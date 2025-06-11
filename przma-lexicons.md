@@ -16,7 +16,7 @@ Instead of fixed cultural frameworks, PRZMA uses configurable cultural dimension
 6. **Environmental/Place**: Land connection, climate wisdom, spatial relationships
 
 ### **Processing Integration**
-- **7P Framework**: People, Process, Products, Places, Pricing, Packaging, Partnerships
+- **7P Framework**: People, Process, Products, Places, Prices, Packages, Partnerships
 - **PRESERVE Framework**: Presence, Relationships, Enablement, Stories, Execution, Resources, Value Creation, Excellence
 - **Age Range**: 2-99 years with developmental appropriateness
 - **Mixed Heritage**: Support for multiple cultural influences simultaneously
@@ -189,7 +189,7 @@ Instead of fixed cultural frameworks, PRZMA uses configurable cultural dimension
 ### **Social Structure Navigation**
 | PRZMA Term | Icon | 7P Application | PRESERVE Application | Cultural Processing |
 |------------|------|----------------|---------------------|-------------------|
-| **We-I Balance** | 👥⚖️👤 | People: Individual/collective balance | Relationships: Individual-group balance | Balances individual-collective through cultural social traditions |
+| **We-Me Balance** | 👥⚖️👤 | People: Individual/collective balance | Relationships: Individual-group balance | Balances individual-collective through cultural social traditions |
 | **Honor-Level** | 🏛📊 | People: Hierarchy navigation | Relationships: Respect level relationships | Honors levels through cultural hierarchy traditions |
 | **Family-Circle** | 👨‍👩‍👧‍👦⭕ | People: Family influence integration | Relationships: Family relationship integration | Circles family through cultural kinship traditions |
 | **Elder-Wisdom** | 👴👵🧠 | People: Elder consultation integration | Stories: Elder wisdom narratives | Honors elders through cultural wisdom traditions |
