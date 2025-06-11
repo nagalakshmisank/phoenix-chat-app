@@ -1,4 +1,4 @@
-# PRZMA.AI Comprehensive Cultural Intelligence Lexicon
+# PRZMA.AI Comprehensive Cultural Intelligence Lexicons
 ## Universal Framework for Perception & Cultural Intelligence Processing
 
 ---
