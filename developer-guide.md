@@ -26,7 +26,7 @@ Imagine building an app like Instagram, but instead of sharing photos, students 
 - Let parents/teachers monitor their progress
 - Search through millions of educational materials
 
-### Why This Architecture?
+### Why This Multi-tier Architecture?
 
 Think of our app like a city with different districts:
 - **Mobile App** = Where students live and work
