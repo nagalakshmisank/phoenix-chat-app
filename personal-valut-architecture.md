@@ -956,101 +956,6 @@ end
 
 ---
 
-## 5. Revenue Model Analysis
-
-### 5.1 Vault-First Revenue Projections
-
-```
-USER BASE EVOLUTION (Vault-First Model):
-
-Year 1: 100K Personal Vaults
-├── Free users: 70K (70%)
-├── Unlimited Personal: 20K (20%) × $9.99 = $199.8K/month
-├── Professional: 8K (8%) × $19.99 = $159.9K/month
-└── Add-ons: 15K attachments × $4.99-14.99 = $124.9K/month
-Total Year 1 Revenue: $484.6K/month = $5.8M/year
-
-Year 2: 500K Personal Vaults
-├── Free users: 300K (60%)
-├── Unlimited Personal: 120K (24%) × $9.99 = $1.2M/month
-├── Professional: 60K (12%) × $19.99 = $1.2M/month
-├── Institutional Attachments: 80K × $4.99 = $399.2K/month
-└── Business Attachments: 40K × $14.99 = $599.6K/month
-Total Year 2 Revenue: $3.4M/month = $40.8M/year
-
-Year 3: 2M Personal Vaults
-├── Free users: 1M (50%)
-├── Unlimited Personal: 600K (30%) × $9.99 = $6M/month
-├── Professional: 300K (15%) × $19.99 = $6M/month
-├── Institutional Attachments: 400K × $4.99 = $2M/month
-└── Business Attachments: 200K × $14.99 = $3M/month
-Total Year 3 Revenue: $17M/month = $204M/year
-```
-
-### 5.2 Infrastructure Costs (Vault-First)
-
-```
-INFRASTRUCTURE SCALING:
-
-Personal Vaults (2M users):
-├── PostgreSQL schemas: $50K/month
-├── CouchDB personal databases: $8M/month
-├── S3 storage (20TB average): $400K/month
-├── Compute and networking: $2M/month
-└── AI and analytics: $1M/month
-Total Personal Infrastructure: $11.45M/month
-
-Institutional Attachments (400K):
-├── Read-only database views: $200K/month
-├── Archive storage: $100K/month
-└── Sync processing: $150K/month
-Total Institutional: $450K/month
-
-Business Attachments (200K):
-├── Workspace connections: $800K/month
-├── Team collaboration: $400K/month
-└── Business features: $300K/month
-Total Business: $1.5M/month
-
-Total Infrastructure: $13.4M/month
-Monthly Profit: $17M - $13.4M = $3.6M/month (21% margin)
-```
-
-### 5.3 Competitive Advantage Analysis
-
-```
-VAULT-FIRST vs COMPETITORS:
-
-Notion:
-❌ Workspace-centric (lose data when leave workspace)
-❌ No true personal ownership
-❌ Complex pricing model
-✅ Our advantage: True personal data ownership
-
-Obsidian:
-❌ Local-only (no cloud sync in free tier)
-❌ Complex setup for non-technical users
-❌ No institutional integration
-✅ Our advantage: Cloud-native with institutional connections
-
-Roam Research:
-❌ Expensive ($15/month minimum)
-❌ Steep learning curve
-❌ No mobile apps
-✅ Our advantage: Accessible with generous free tier
-
-Evernote:
-❌ Limited free tier (60MB/month)
-❌ Outdated interface
-❌ No collaboration features
-✅ Our advantage: 10GB free + modern collaboration
-
-Google Docs/Drive:
-❌ No offline-first architecture
-❌ Limited note-taking features
-❌ Privacy concerns
-✅ Our advantage: Privacy-focused with advanced note features
-```
 
 ---
 
@@ -1270,8 +1175,6 @@ end
 
 ## Final Recommendation
 
-### ✅ **STRONGLY RECOMMENDED: Personal Vault-First Architecture**
-
 ```
 CORE STRATEGY:
 1. Every user gets a 10GB personal vault (FREE)
@@ -1288,13 +1191,6 @@ CORE STRATEGY:
 4. **Lifetime Relationship**: User relationship survives institutional changes
 5. **Flexible Business Model**: Users pay for what they need
 
-### 📈 **Financial Projections:**
-
-```
-Year 1: $5.8M revenue, break-even
-Year 2: $40.8M revenue, 15% profit margin  
-Year 3: $204M revenue, 21% profit margin
-```
 
 ### 🚀 **Competitive Advantages:**
 
