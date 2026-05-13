@@ -1,0 +1,171 @@
+# deploy/docker/docker-compose.yml
+#
+# PRZMA Self-Hosted — complete stack for Linode / DigitalOcean / any VPS.
+# All Lance vault data is stored in MinIO (S3-compatible, local).
+# PostgreSQL handles Oban job queue only.
+#
+# Quick start:
+#   curl -sSL https://get.przma.app | bash
+#   # OR manually:
+#   cp .env.example .env && nano .env
+#   docker compose up -d
+#
+# Minimum server: 2 CPU, 4GB RAM, 40GB disk ($24-28/month on Linode/DO)
+
+version: '3.8'
+
+services:
+
+  # ── PRZMA APPLICATION ──────────────────────────────────────────────────────
+  przma:
+    image: przma/server:${PRZMA_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # === Required ===
+      SECRET_KEY_BASE:      ${SECRET_KEY_BASE}
+      PRZMA_INSTANCE_URL:   ${PRZMA_INSTANCE_URL}
+
+      # === Database (Oban job queue only) ===
+      DATABASE_URL: postgresql://przma:${POSTGRES_PASSWORD}@postgres:5432/przma
+
+      # === Deployment mode ===
+      PRZMA_MODE:       own_domain
+      PRZMA_LOCAL_PATH: /data/vaults
+
+      # === Object storage (MinIO — local S3) ===
+      PRZMA_S3_ENDPOINT:    http://minio:9000
+      PRZMA_S3_BUCKET:      przma-vaults
+      PRZMA_S3_REGION:      us-east-1
+      PRZMA_S3_ACCESS_KEY:  ${MINIO_ACCESS_KEY:-przma}
+      PRZMA_S3_SECRET:      ${MINIO_SECRET_KEY}
+
+      # === Optional: encryption master key ===
+      # Generate with: openssl rand -hex 32
+      # PRZMA_MASTER_KEY_DEFAULT: ${PRZMA_MASTER_KEY}
+
+      # === Optional: email (for notifications) ===
+      # SMTP_HOST:     smtp.example.com
+      # SMTP_PORT:     587
+      # SMTP_USER:     ${SMTP_USER}
+      # SMTP_PASS:     ${SMTP_PASS}
+      # SMTP_FROM:     noreply@your-domain.com
+
+      # === Optional: ActivityPub federation ===
+      # PRZMA_AP_ENABLED: "true"
+
+      # === PHX settings ===
+      PHX_HOST:       ${PRZMA_INSTANCE_HOST}
+      PORT:           4000
+      POOL_SIZE:      10
+
+    volumes:
+      - vault_data:/data/vaults
+      - ./keys:/etc/przma/keys:ro  # Encryption keys (optional)
+
+    ports:
+      - "127.0.0.1:4000:4000"   # Bind to localhost; Caddy proxies externally
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ── POSTGRESQL (Oban job queue only) ──────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       przma
+      POSTGRES_USER:     przma
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA:            /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U przma -d przma"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Not exposed externally — internal network only
+    expose:
+      - "5432"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+
+  # ── MINIO (S3-compatible local object storage) ─────────────────────────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ACCESS_KEY:-przma}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    expose:
+      - "9000"
+    # MinIO admin console — bind to localhost, access via SSH tunnel if needed
+    ports:
+      - "127.0.0.1:9001:9001"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+
+  # ── MINIO INIT (creates bucket on first run) ───────────────────────────────
+  minio_init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ACCESS_KEY:-przma}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD
+        mc mb --ignore-existing local/przma-vaults
+        mc anonymous set none local/przma-vaults
+        echo 'MinIO bucket ready'
+      "
+    restart: "no"
+
+# ── VOLUMES ───────────────────────────────────────────────────────────────────
+volumes:
+  vault_data:
+    driver: local
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
+
+# ── NETWORK ───────────────────────────────────────────────────────────────────
+# All services communicate on an internal network.
+# Only Caddy (external) reaches the przma service on port 4000.
+networks:
+  default:
+    name: przma_network

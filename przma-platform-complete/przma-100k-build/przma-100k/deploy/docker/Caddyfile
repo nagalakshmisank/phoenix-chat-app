@@ -1,0 +1,67 @@
+# deploy/docker/Caddyfile
+#
+# Caddy reverse proxy configuration for PRZMA self-hosted.
+# Automatic HTTPS via Let's Encrypt DNS-01 challenge.
+# Replace `przma.yourdomain.com` with your actual domain.
+#
+# Install Caddy: https://caddyserver.com/docs/install
+# Then: caddy run --config /path/to/Caddyfile
+
+{
+    # Global options
+    email {$ACME_EMAIL}  # Required for Let's Encrypt notifications
+}
+
+{$PRZMA_INSTANCE_HOST} {
+    # Reverse proxy to Phoenix
+    reverse_proxy localhost:4000 {
+        # Health check
+        health_uri      /health
+        health_interval 30s
+        health_timeout  10s
+
+        # Phoenix headers
+        header_up Host              {host}
+        header_up X-Real-IP         {remote_host}
+        header_up X-Forwarded-For   {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # WebSocket support (Phoenix channels)
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade    websocket
+    }
+    handle @websocket {
+        reverse_proxy localhost:4000
+    }
+
+    # ActivityPub content negotiation
+    @activitypub {
+        header Accept *application/activity+json*
+    }
+    handle @activitypub {
+        reverse_proxy localhost:4000 {
+            header_up Content-Type application/activity+json
+        }
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "SAMEORIGIN"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+    }
+
+    # Compress responses
+    encode zstd gzip
+
+    # Logs
+    log {
+        output file /var/log/caddy/przma.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}
