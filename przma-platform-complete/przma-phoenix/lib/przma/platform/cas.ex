@@ -13,6 +13,7 @@
 defmodule PRZMA.Platform.CAS do
   alias PRZMA.Calendar.NIF     # Reuses the existing NIF module
   alias PRZMA.Platform.ServicesCatalogue, as: SC
+  alias PRZMA.Platform.Namespace
 
   # Get base path from runtime config (defaults to local /tmp for dev)
   def base_path do
@@ -207,4 +208,57 @@ defmodule PRZMA.Platform.CAS do
       {:error, reason} -> {:error, "failed to read blob: #{reason}"}
     end
   end
+  @doc "Store a blob keyed by the client-provided BLAKE3 hash."
+  def put_blob(did, hash, data) when is_binary(hash) and is_binary(data) do
+    base = base_path()
+    shard = String.slice(hash, 0, 2)
+
+    if s3?(base) do
+      {bucket, prefix} = parse_s3(base)
+      key = join_key([prefix, Namespace.sanitize_did(did), "cas", shard, hash])
+      case ExAws.S3.put_object(bucket, key, data) |> ExAws.request() do
+        {:ok, _} -> {:ok, "cas:#{hash}"}
+        {:error, reason} -> {:error, "s3 put failed: #{inspect(reason)}"}
+      end
+    else
+      path = Path.join([base, Namespace.sanitize_did(did), "cas", shard, hash])
+      with :ok <- File.mkdir_p(Path.dirname(path)),
+           :ok <- File.write(path, data) do
+        {:ok, "cas:#{hash}"}
+      else
+        {:error, reason} -> {:error, "blob write failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  @doc "Read a blob by BLAKE3 hash from S3 or local disk."
+  def get_blob(did, hash) when is_binary(hash) do
+    base = base_path()
+    shard = String.slice(hash, 0, 2)
+
+    if s3?(base) do
+      {bucket, prefix} = parse_s3(base)
+      key = join_key([prefix, Namespace.sanitize_did(did), "cas", shard, hash])
+      case ExAws.S3.get_object(bucket, key) |> ExAws.request() do
+        {:ok, %{body: body}} -> {:ok, body}
+        {:error, _} -> {:error, :not_found}
+      end
+    else
+      path = Path.join([base, Namespace.sanitize_did(did), "cas", shard, hash])
+      case File.read(path) do
+        {:ok, data} -> {:ok, data}
+        {:error, :enoent} -> {:error, :not_found}
+        {:error, reason} -> {:error, "blob read failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp s3?(p), do: String.starts_with?(p, "s3://")
+  defp parse_s3("s3://" <> rest) do
+    case String.split(rest, "/", parts: 2) do
+      [bucket, prefix] -> {bucket, prefix}
+      [bucket] -> {bucket, ""}
+    end
+  end
+  defp join_key(parts), do: parts |> Enum.reject(&(&1 == "")) |> Enum.join("/")
 end

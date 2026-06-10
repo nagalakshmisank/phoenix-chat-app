@@ -197,6 +197,14 @@ impl FileStore {
     pub async fn pending_syncs(&self) -> FilesResult<Vec<FileRecord>> {
         let mut pending = vec![];
 
+        // 0. Core  ← core now syncs to the backend too
+        if let Ok(files) = self.list(&Space::Core).await {
+            for f in files {
+                if !f.synced {
+                    pending.push(f);
+                }
+            }
+        }
         // 1. Check Commons
         if let Ok(files) = self.list(&Space::Commons).await {
             for f in files {

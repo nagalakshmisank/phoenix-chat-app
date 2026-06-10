@@ -59,45 +59,23 @@ defmodule PRZMAWeb.FileSyncController do
       └─ Returns cas_uri = "cas:{hash}"
   """
   def upload_blob(conn, %{
-    "did" => did,
-    "blake3_hash" => provided_hash,
-    "blob" => %Plug.Upload{path: tmp_path}
-  }) do
+        "did" => did,
+        "blake3_hash" => hash,
+        "blob" => %Plug.Upload{path: tmp_path}
+      }) do
     auth_did = conn.assigns[:did]
 
     with :ok <- verify_did(auth_did, did),
          {:ok, blob_data} <- File.read(tmp_path),
-         # Verify BLAKE3 hash matches
-         actual_hash <- blake3_hash(blob_data),
-         :ok <- verify_hash(actual_hash, provided_hash),
-         # Store in CAS (handles encryption, dedup, ref_count)
-         {:ok, cas_uri} <- CAS.put(did, blob_data,
-           written_by: "files",
-           mime_type: Map.get(%{}, "mime_type")
-         ) do
-
-      size_bytes = byte_size(blob_data)
-      Logger.info("[FileSyncController] blob uploaded did=#{did} hash=#{actual_hash} size=#{size_bytes}")
-
+         {:ok, cas_uri} <- CAS.put_blob(did, hash, blob_data) do
       json(conn, %{
-        cas_hash: actual_hash,
-        cas_uri: cas_uri,
-        status: "stored",
-        size_bytes: size_bytes,
-        ref_count: 1  # Backend tells frontend this is first or existing
+        cas_hash: hash, cas_uri: cas_uri, status: "stored",
+        size_bytes: byte_size(blob_data), ref_count: 1
       })
     else
-      {:error, :did_mismatch} ->
-        conn |> put_status(403) |> json(%{error: "did_mismatch"})
-
-      {:error, :hash_mismatch} ->
-        conn |> put_status(400) |> json(%{error: "hash_mismatch"})
-
-      {:error, reason} ->
-        Logger.error("[FileSyncController] blob upload failed did=#{did} reason=#{inspect(reason)}")
-        conn |> put_status(500) |> json(%{error: to_string(reason)})
+      {:error, :did_mismatch} -> conn |> put_status(403) |> json(%{error: "did_mismatch"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: to_string(reason)})
     after
-      # Clean up temp file
       File.rm(tmp_path)
     end
   end
@@ -346,7 +324,7 @@ defmodule PRZMAWeb.FileSyncController do
     did = conn.assigns[:did]
     cas_uri = SC.cas_uri(hash)
 
-    case CAS.get(did, cas_uri) do
+    case CAS.get_blob(did, hash) do
       {:ok, data} ->
         conn
         |> put_resp_content_type("application/octet-stream")

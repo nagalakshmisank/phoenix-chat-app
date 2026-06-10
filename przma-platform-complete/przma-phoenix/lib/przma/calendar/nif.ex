@@ -6,7 +6,8 @@
 defmodule PRZMA.Calendar.NIF do
   use Rustler,
     otp_app: :przma,
-    crate:   "przma_nif"
+    crate:   "przma_nif",
+    skip_compilation?: Mix.env() != :prod
 
   # ── Events ────────────────────────────────────────────────────────────────
 
@@ -78,3 +79,4 @@ defmodule PRZMA.Calendar.NIF.Phase6 do
   # practice_adherence/5, meeting_patterns/4, generate_insights/4
   # All registered in przma-nif/src/lib.rs rustler::init! block.
 end
+
