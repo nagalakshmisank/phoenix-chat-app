@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 przma-calendar = { path = "../przma-calendar" }
+przma-platform = { path = "../przma-platform" }
 rustler         = { workspace = true }
 tokio           = { workspace = true }
 serde_json      = { workspace = true }

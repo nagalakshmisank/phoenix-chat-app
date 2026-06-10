@@ -2,7 +2,6 @@
 
 pub mod cas;
 pub mod namespace;
-pub mod services;
 
 use thiserror::Error;
 

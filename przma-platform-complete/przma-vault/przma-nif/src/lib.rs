@@ -5,7 +5,7 @@
 
 use przma_calendar::{
     analytics::CalendarAnalytics,
-    cas::CasStore,
+    cas::{CasStore, CasTable},
     events::EventStore,
     models::{CalendarEvent, CalendarTask, EventCategory, Space},
     recurrence,
@@ -266,6 +266,54 @@ fn cas_get<'a>(env: Env<'a>, base_path: String, did: String, hash: String) -> Te
     })
 }
 
+// ─── CAS TABLE NIFs ───────────────────────────────────────────────────────────
+
+/// cas_table_put(base_path, did, data, file_name, mime_type, written_by)
+/// -> {:ok, "cas:{hash}"} | {:error, reason}
+#[rustler::nif(schedule = "DirtyIo")]
+fn cas_table_put<'a>(
+    env:        Env<'a>,
+    base_path:  String,
+    did:        String,
+    data:       Binary,
+    file_name:  String,
+    mime_type:  String,
+    written_by: String,
+) -> Term<'a> {
+    let bytes = data.as_slice().to_vec();
+    let fname = if file_name.is_empty() { None } else { Some(file_name.as_str()) };
+    let mtype = if mime_type.is_empty()  { None } else { Some(mime_type.as_str()) };
+    runtime().block_on(async move {
+        match CasTable::open(&base_path, &did).await {
+            Err(e)    => err_atom(env, &e.to_string()),
+            Ok(table) => match table.put(&bytes, fname, mtype, &written_by).await {
+                Ok(link) => ok_json(env, &link),
+                Err(e)   => err_atom(env, &e.to_string()),
+            },
+        }
+    })
+}
+
+/// cas_table_get_link(base_path, did, hash) -> {:ok, link} | {:error, "not_found"}
+#[rustler::nif(schedule = "DirtyIo")]
+fn cas_table_get_link<'a>(
+    env:       Env<'a>,
+    base_path: String,
+    did:       String,
+    hash:      String,
+) -> Term<'a> {
+    runtime().block_on(async move {
+        match CasTable::open(&base_path, &did).await {
+            Err(e)    => err_atom(env, &e.to_string()),
+            Ok(table) => match table.get_link(&hash).await {
+                Ok(Some(link)) => ok_json(env, &link),
+                Ok(None)       => err_atom(env, "not_found"),
+                Err(e)         => err_atom(env, &e.to_string()),
+            },
+        }
+    })
+}
+
 // ─── RECURRENCE NIFs ──────────────────────────────────────────────────────────
 
 /// expand_rrule(rrule_str, dtstart_micros, tz, range_start_micros, range_end_micros, max)
@@ -380,4 +428,6 @@ rustler::init!("Elixir.PRZMA.Calendar.NIF", [
     social_nif::social_deactivate_membership, social_nif::social_update_role,
     social_nif::social_list_circles_for, social_nif::social_insert_follower,
     social_nif::social_list_followers, social_nif::social_remove_follower,
+    cas_table_put,
+    cas_table_get_link,
 ]);

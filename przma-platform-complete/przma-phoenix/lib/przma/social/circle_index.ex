@@ -138,21 +138,21 @@ defmodule PRZMA.Social.CircleIndex do
     # Read memberships Lance file via DuckDB
     lance_path = "#{base_path}/#{did}/social/core/memberships.lance"
     unless File.dir?(lance_path) do
-      return []
-    end
+      []
+    else
+      conn = Duckdbex.open(":memory:") |> elem(1)
+      Duckdbex.query(conn, "INSTALL lance; LOAD lance;")
 
-    conn = Duckdbex.open(":memory:") |> elem(1)
-    Duckdbex.query(conn, "INSTALL lance; LOAD lance;")
-
-    sql = "SELECT did, circle_did, role, is_active FROM scan_lance('#{lance_path}') WHERE is_active = true"
-    case Duckdbex.query(conn, sql) do
-      {:ok, result} ->
-        result
-        |> Duckdbex.fetch_all()
-        |> Enum.map(fn [did, circle_did, role, is_active] ->
-            %{"did" => did, "circle_did" => circle_did, "role" => role, "is_active" => is_active}
-          end)
-      {:error, _} -> []
+      sql = "SELECT did, circle_did, role, is_active FROM scan_lance('#{lance_path}') WHERE is_active = true"
+      case Duckdbex.query(conn, sql) do
+        {:ok, result} ->
+          result
+          |> Duckdbex.fetch_all()
+          |> Enum.map(fn [did, circle_did, role, is_active] ->
+              %{"did" => did, "circle_did" => circle_did, "role" => role, "is_active" => is_active}
+            end)
+        {:error, _} -> []
+      end
     end
   end
 

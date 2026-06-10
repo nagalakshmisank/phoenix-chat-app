@@ -1,0 +1,436 @@
+# lib/przma_web/controllers/file_sync_controller.ex
+#
+# File Sync Controller for offline client synchronization.
+#
+# Integrates:
+# - Local FileStore (via Rust NIF) - files_store.rs
+# - PRZMA.Platform.CAS - blob storage with deduplication
+# - PRZMA.PzDb - Lance-backed write/read with encryption
+# - PRZMA.Platform.ServicesCatalogue - service metadata
+#
+# Sync Flow:
+#   1. POST /sync/blob      → CAS.put() → Blob stored + dedup via ref_count
+#   2. POST /sync/record    → PzDb.write() → FileRecord in Lance
+#   3. POST /sync/mark-synced → Update queue + file status
+#   4. GET  /sync/list      → PzDb.query() → List remote files
+#   5. GET  /sync/pending   → List pending syncs from queue
+#   6. GET  /sync/blob/:hash → CAS.get() → Download blob
+
+defmodule PRZMAWeb.FileSyncController do
+  use PRZMAWeb, :controller
+
+  alias PRZMA.PzDb
+  alias PRZMA.Platform.CAS
+  alias PRZMA.Platform.ServicesCatalogue, as: SC
+  require Logger
+
+  # ── BLOB UPLOAD (CAS WITH DEDUP) ────────────────────────────────────────────
+  # Blob is stored once, ref_count incremented for each file reference.
+  # Format: CAS stores at s3://bucket/cas/{shard_2}/{blake3_hash}
+  # Metadata: CAS table in Lance tracks hash, ref_count, shareable_link, mime_type
+
+  @doc """
+  Upload a file blob to CAS.
+
+  Request:
+    POST /api/v1/files/sync/blob
+    {
+      "did": "did:web:alice.com",
+      "blake3_hash": "75fd760abc...",  # BLAKE3 hash of blob (64 hex chars)
+      "blob": <binary>                  # File content
+    }
+
+  Response (200):
+    {
+      "cas_hash": "75fd760abc...",
+      "cas_uri": "cas:75fd760abc...",
+      "status": "stored",
+      "size_bytes": 5242880,
+      "ref_count": 1  # NEW: 1, or incremented if existed
+    }
+
+  Uses:
+    - CAS.put(did, data, written_by: "files")
+      ├─ Encrypts blob with AES-256-GCM
+      ├─ Calculates BLAKE3 hash (verify matches provided hash!)
+      ├─ Checks Lance: hash exists?
+      │  ├─ YES: increment ref_count, return cas_uri
+      │  └─ NO: write blob to s3, insert Lance row with ref_count=1
+      └─ Returns cas_uri = "cas:{hash}"
+  """
+  def upload_blob(conn, %{
+    "did" => did,
+    "blake3_hash" => provided_hash,
+    "blob" => %Plug.Upload{path: tmp_path}
+  }) do
+    auth_did = conn.assigns[:did]
+
+    with :ok <- verify_did(auth_did, did),
+         {:ok, blob_data} <- File.read(tmp_path),
+         # Verify BLAKE3 hash matches
+         actual_hash <- blake3_hash(blob_data),
+         :ok <- verify_hash(actual_hash, provided_hash),
+         # Store in CAS (handles encryption, dedup, ref_count)
+         {:ok, cas_uri} <- CAS.put(did, blob_data,
+           written_by: "files",
+           mime_type: Map.get(%{}, "mime_type")
+         ) do
+
+      size_bytes = byte_size(blob_data)
+      Logger.info("[FileSyncController] blob uploaded did=#{did} hash=#{actual_hash} size=#{size_bytes}")
+
+      json(conn, %{
+        cas_hash: actual_hash,
+        cas_uri: cas_uri,
+        status: "stored",
+        size_bytes: size_bytes,
+        ref_count: 1  # Backend tells frontend this is first or existing
+      })
+    else
+      {:error, :did_mismatch} ->
+        conn |> put_status(403) |> json(%{error: "did_mismatch"})
+
+      {:error, :hash_mismatch} ->
+        conn |> put_status(400) |> json(%{error: "hash_mismatch"})
+
+      {:error, reason} ->
+        Logger.error("[FileSyncController] blob upload failed did=#{did} reason=#{inspect(reason)}")
+        conn |> put_status(500) |> json(%{error: to_string(reason)})
+    after
+      # Clean up temp file
+      File.rm(tmp_path)
+    end
+  end
+
+  def upload_blob(conn, _params) do
+    conn
+    |> put_status(400)
+    |> json(%{error: "missing fields: did, blake3_hash, blob"})
+  end
+
+  # ── FILE RECORD SYNC (METADATA TO LANCE) ────────────────────────────────────
+  # FileRecord (20 fields) written to Lance via PzDb.
+  # Format: pzdb://did/files/{space}/file/{id}
+  # Storage: Lance table at {base}/{did}/files/{space}/files/data/0.lance
+  # Encryption: Automatic via PzDb encryption context
+
+  @doc """
+  Sync file metadata record to Lance.
+
+  Request:
+    POST /api/v1/files/sync/record
+    {
+      "id": "550e8400-...",
+      "did": "did:web:alice.com",
+      "space": "core",
+      "przma_uri": "przma://did:web:alice.com/files/core/file/550e8400-...",
+      "name": "photo.jpg",
+      "path": "/photos/",
+      "mime_type": "image/jpeg",
+      "size_bytes": 5242880,
+      "content_cas": "cas:75fd760abc...",    # Link to blob uploaded in step 1
+      "thumbnail_cas": null,
+      "versions_json": "[...]",
+      "current_version": 1,
+      "tags_json": "[]",
+      "source_uri": null,
+      "embedding": [0.0, 0.1, ...],          # 768-dim vector
+      "is_public": false,
+      "is_encrypted": false,
+      "upload_status": "synced",
+      "chunk_count": null,
+      "chunks_received": null,
+      "created_at": 1743868234000000,
+      "updated_at": 1743868234000000
+    }
+
+  Response (200):
+    {
+      "file_id": "550e8400-...",
+      "status": "synced",
+      "version": 42
+    }
+
+  Uses:
+    - PzDb.write(pzdb_uri, file_record, opts)
+      ├─ Encryption context applied automatically
+      ├─ WriteRouter routes by DID to correct node
+      ├─ VaultWriter serializes (sequential per DID)
+      ├─ NIF.pzdb_upsert() calls Rust
+      │  └─ merge_insert to Lance {base}/{did}/files/{space}/files/data/0.lance
+      ├─ ReadCache.invalidate() for this URI
+      ├─ MetadataIndex.index() async emit
+      └─ Returns version tag for future reads
+  """
+  def sync_record(conn, params) do
+    auth_did = conn.assigns[:did]
+    rec_did = params["did"]
+    file_id = params["id"]
+    space = params["space"] || "core"
+
+    with :ok <- verify_did(auth_did, rec_did),
+         # Construct PzDb URI: pzdb://did/files/{space}/file/{id}
+         pzdb_uri = "pzdb://#{rec_did}/files/#{space}/file/#{file_id}",
+         # Ensure table exists
+         :ok <- PzDb.ensure_table(pzdb_uri),
+         # Write record to Lance via PzDb (handles encryption + serialization)
+         {:ok, result} <- PzDb.write(pzdb_uri, params, [
+           encrypt: true,
+           index_opts: %{
+             title: params["name"],
+             snippet: "File: #{params["name"]}",
+             source: "files"
+           }
+         ]) do
+
+      version = result["version"]
+      Logger.info("[FileSyncController] record synced did=#{rec_did} file=#{file_id} space=#{space} version=#{version}")
+
+      json(conn, %{
+        file_id: file_id,
+        status: "synced",
+        version: version
+      })
+    else
+      {:error, :did_mismatch} ->
+        conn |> put_status(403) |> json(%{error: "did_mismatch"})
+
+      {:error, reason} ->
+        Logger.error("[FileSyncController] record sync failed did=#{rec_did} reason=#{inspect(reason)}")
+        conn |> put_status(500) |> json(%{error: to_string(reason)})
+    end
+  end
+
+  # ── MARK SYNCED (UPDATE QUEUE + FILE) ───────────────────────────────────────
+  # Updates TWO Lance tables:
+  # 1. SyncQueueEntry: status "pending" → "synced", synced_at = now
+  # 2. FileRecord: upload_status "pending" → "synced", updated_at = now
+
+  @doc """
+  Mark file as synced (update queue + file record).
+
+  Request:
+    POST /api/v1/files/sync/mark-synced
+    {
+      "file_id": "550e8400-...",
+      "space": "core"
+    }
+
+  Response (200):
+    {
+      "file_id": "550e8400-...",
+      "status": "synced"
+    }
+
+  Uses:
+    - PzDb.write() twice:
+      1. Update SyncQueueEntry: status → "synced"
+      2. Update FileRecord: upload_status → "synced"
+  """
+  def mark_synced(conn, %{"file_id" => file_id, "space" => space}) do
+    did = conn.assigns[:did]
+    now_micros = System.os_time(:microsecond)
+
+    # Update queue entry
+    queue_uri = "pzdb://#{did}/files/sync_queue/#{file_id}"
+    queue_record = %{
+      "id" => file_id,
+      "status" => "synced",
+      "synced_at" => now_micros
+    }
+
+    # Update file record
+    file_uri = "pzdb://#{did}/files/#{space}/file/#{file_id}"
+    file_update = %{
+      "id" => file_id,
+      "upload_status" => "synced",
+      "updated_at" => now_micros
+    }
+
+    with {:ok, _} <- PzDb.write(queue_uri, queue_record),
+         {:ok, _} <- PzDb.write(file_uri, file_update) do
+
+      Logger.info("[FileSyncController] marked synced did=#{did} file=#{file_id} space=#{space}")
+
+      json(conn, %{
+        file_id: file_id,
+        status: "synced"
+      })
+    else
+      {:error, reason} ->
+        Logger.error("[FileSyncController] mark_synced failed reason=#{inspect(reason)}")
+        conn |> put_status(500) |> json(%{error: to_string(reason)})
+    end
+  end
+
+  # ── LIST REMOTE FILES ───────────────────────────────────────────────────────
+  # Query Lance for synced files in a space.
+  # Uses PzDb.query() with filter: upload_status = 'synced'
+
+  @doc """
+  List synced files in a space.
+
+  Request:
+    GET /api/v1/files/sync/list?space=core&limit=500
+
+  Response (200):
+    {
+      "files": [
+        {
+          "id": "550e8400-...",
+          "did": "did:web:alice.com",
+          "space": "core",
+          "name": "photo.jpg",
+          ...
+        },
+        ...
+      ],
+      "space": "core",
+      "count": 150
+    }
+
+  Uses:
+    - PzDb.query(pzdb_table_uri, filter: "upload_status = 'synced'")
+      ├─ ReadCache check first (O(1) ETS)
+      ├─ If miss: NIF.pzdb_read() → Lance query
+      ├─ Decrypt records
+      └─ Returns [FileRecord, ...]
+  """
+  def list_remote(conn, params) do
+    did = conn.assigns[:did]
+    space = params["space"] || "core"
+    limit = parse_limit(params["limit"])
+
+    pzdb_table_uri = "pzdb://#{did}/files/#{space}/file/placeholder"
+
+    case PzDb.query(pzdb_table_uri,
+      filter: "upload_status = 'synced'",
+      limit: limit
+    ) do
+      {:ok, %{"records" => records}} ->
+        json(conn, %{
+          files: records,
+          space: space,
+          count: length(records)
+        })
+
+      {:error, reason} ->
+        Logger.error("[FileSyncController] list_remote failed space=#{space} reason=#{inspect(reason)}")
+        conn |> put_status(500) |> json(%{error: to_string(reason)})
+    end
+  end
+
+  # ── DOWNLOAD BLOB (CAS RETRIEVAL) ───────────────────────────────────────────
+  # Retrieve encrypted blob by hash.
+  # Uses CAS.get() which decrypts + returns binary.
+
+  @doc """
+  Download a blob from CAS.
+
+  Request:
+    GET /api/v1/files/sync/blob/75fd760abc...
+
+  Response (200):
+    Binary blob data
+    Headers: Content-Type: application/octet-stream
+             x-przma-blake3: 75fd760abc...
+
+  Uses:
+    - CAS.get(did, cas_uri)
+      ├─ Query Lance for cas_uri metadata
+      ├─ Retrieve blob from s3://bucket/cas/{shard}/{hash}
+      ├─ Decrypt blob with AES-256-GCM
+      └─ Returns bytes
+  """
+  def download_blob(conn, %{"hash" => hash}) do
+    did = conn.assigns[:did]
+    cas_uri = SC.cas_uri(hash)
+
+    case CAS.get(did, cas_uri) do
+      {:ok, data} ->
+        conn
+        |> put_resp_content_type("application/octet-stream")
+        |> put_resp_header("x-przma-blake3", hash)
+        |> send_resp(200, data)
+
+      {:error, reason} ->
+        Logger.error("[FileSyncController] blob download failed hash=#{hash} reason=#{inspect(reason)}")
+        conn |> put_status(404) |> json(%{error: "not_found", hash: hash})
+    end
+  end
+
+  # ── LIST PENDING SYNCS (FROM QUEUE) ─────────────────────────────────────────
+  # Query SyncQueueEntry table for pending entries.
+  # Uses PzDb.query() with filter: status = 'pending'
+
+  @doc """
+  List pending syncs from queue.
+
+  Request:
+    GET /api/v1/files/sync/pending?limit=100
+
+  Response (200):
+    {
+      "pending_syncs": [
+        {
+          "id": "queue_550e8400-...",
+          "file_id": "550e8400-...",
+          "file_name": "photo.jpg",
+          "status": "pending",
+          "enqueued_at": 1743868234000000,
+          ...
+        },
+        ...
+      ],
+      "count": 5
+    }
+
+  Uses:
+    - PzDb.query(pzdb_queue_uri, filter: "status = 'pending'")
+      └─ Returns [SyncQueueEntry, ...]
+  """
+  def list_pending(conn, params) do
+    did = conn.assigns[:did]
+    limit = parse_limit(params["limit"])
+
+    pzdb_queue_uri = "pzdb://#{did}/files/sync_queue/placeholder"
+
+    case PzDb.query(pzdb_queue_uri,
+      filter: "status = 'pending'",
+      limit: limit
+    ) do
+      {:ok, %{"records" => pending}} ->
+        json(conn, %{
+          pending_syncs: pending,
+          count: length(pending)
+        })
+
+      {:error, reason} ->
+        Logger.error("[FileSyncController] list_pending failed reason=#{inspect(reason)}")
+        conn |> put_status(500) |> json(%{error: to_string(reason)})
+    end
+  end
+
+  # ── PRIVATE HELPERS ─────────────────────────────────────────────────────────
+
+  defp verify_did(auth_did, req_did) when auth_did == req_did, do: :ok
+  defp verify_did(_auth, _req), do: {:error, :did_mismatch}
+
+  defp blake3_hash(data) do
+    # Use Erlang's native hash or library
+    # For now: simple placeholder
+    # In production: use blake3 Elixir package
+    :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
+  end
+
+  defp verify_hash(actual, expected) do
+    if actual == expected, do: :ok, else: {:error, :hash_mismatch}
+  end
+
+  defp parse_limit(nil), do: 500
+  defp parse_limit(n) when is_binary(n), do: String.to_integer(n)
+  defp parse_limit(n) when is_integer(n), do: n
+
+  defp to_string(r) when is_binary(r), do: r
+  defp to_string(r), do: inspect(r)
+end

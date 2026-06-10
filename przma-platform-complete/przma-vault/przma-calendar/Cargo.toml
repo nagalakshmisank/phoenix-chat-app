@@ -11,7 +11,6 @@ arrow-array  = { workspace = true }
 arrow-buffer = { workspace = true }
 arrow-cast   = { workspace = true }
 blake3       = { workspace = true }
-duckdb       = { workspace = true }
 chrono       = { workspace = true }
 rrule        = { workspace = true }
 serde        = { workspace = true }
@@ -22,6 +21,8 @@ uuid         = { workspace = true }
 thiserror    = { workspace = true }
 anyhow       = { workspace = true }
 tracing      = { workspace = true }
+object_store = { workspace = true }
+bytes        = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

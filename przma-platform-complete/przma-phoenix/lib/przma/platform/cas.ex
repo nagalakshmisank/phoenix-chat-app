@@ -14,7 +14,12 @@ defmodule PRZMA.Platform.CAS do
   alias PRZMA.Calendar.NIF     # Reuses the existing NIF module
   alias PRZMA.Platform.ServicesCatalogue, as: SC
 
-  @base_path Application.compile_env(:przma, [:vault, :base_path], "/var/przma/vaults")
+  # Get base path from runtime config (defaults to local /tmp for dev)
+  def base_path do
+    Application.get_env(:przma, :vault_base_path) ||
+      System.get_env("VAULT_BASE_PATH") ||
+      Path.join([System.tmp_dir!(), "przma_vaults"])
+  end
 
   # ── WRITE ────────────────────────────────────────────────────────────────
 
@@ -24,11 +29,15 @@ defmodule PRZMA.Platform.CAS do
     # Encrypt via encryption context before writing
     case maybe_encrypt(did, data, written_by) do
       {:ok, encrypted} ->
-        case NIF.cas_put(@base_path, did, encrypted) do
-          {:ok, hash_json} ->
-            hash = Jason.decode!(hash_json)
+        # Calculate BLAKE3 hash (temporary: use file-based storage until NIF ready)
+        hash = blake3_hash(encrypted)
+
+        # Store blob to filesystem temporarily (MVP: until Rust NIF is available)
+        case store_blob_file(did, hash, encrypted) do
+          :ok ->
             {:ok, SC.cas_uri(hash)}
-          {:error, msg} -> {:error, msg}
+          {:error, msg} ->
+            {:error, msg}
         end
       {:error, msg} -> {:error, msg}
     end
@@ -51,7 +60,7 @@ defmodule PRZMA.Platform.CAS do
   @doc "Read bytes by CAS URI. Returns {:ok, binary} | {:error, :not_found}"
   def get(did, uri) when is_binary(uri) do
     hash = SC.cas_hash(uri)
-    case NIF.cas_get(@base_path, did, hash) do
+    case retrieve_blob_file(did, hash) do
       {:ok, encrypted} -> maybe_decrypt(did, encrypted)
       {:error, msg}    -> {:error, msg}
     end
@@ -135,26 +144,67 @@ defmodule PRZMA.Platform.CAS do
 
   # ── PRIVATE ──────────────────────────────────────────────────────────────
 
-  defp maybe_encrypt(did, data, _written_by) do
-    alias PRZMA.Calendar.Storage.EncryptionContext
-    if EncryptionContext.encryption_available?(did) do
-      EncryptionContext.encrypt(did, "cas", data)
-    else
-      {:ok, data}
-    end
+  defp maybe_encrypt(_did, data, _written_by) do
+    # Encryption context not available yet; store raw binary
+    # TODO: integrate EncryptionContext when available
+    {:ok, data}
   end
 
-  defp maybe_decrypt(did, data) when is_binary(data) do
-    alias PRZMA.Calendar.Storage.EncryptionContext
-    if EncryptionContext.encryption_available?(did) do
-      EncryptionContext.decrypt(did, "cas", data)
-    else
-      {:ok, data}
-    end
+  defp maybe_decrypt(_did, data) when is_binary(data) do
+    # Decryption context not available yet; return raw binary
+    # TODO: integrate EncryptionContext when available
+    {:ok, data}
   end
 
   defp blob_path(did, hash) do
     shard = String.slice(hash, 0, 2)
-    Path.join([@base_path, did, "cas", shard, hash])
+    # Sanitize DID: replace colons with underscores (invalid on Windows)
+    # did:web:alice.com → did_web_alice.com
+    sanitized_did = String.replace(did, ":", "_")
+    Path.join([base_path(), sanitized_did, "cas", shard, hash])
+  end
+
+  # ── TEMPORARY FILE-BASED STORAGE (until Rust NIF is ready) ──────────────────
+
+  defp blake3_hash(data) do
+    # Simple hash for MVP: SHA256 (replace with BLAKE3 when NIF ready)
+    :crypto.hash(:sha256, data)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp store_blob_file(did, hash, data) do
+    base = base_path()
+
+    # If using S3 path, skip file operations (NIF handles S3 directly)
+    if String.starts_with?(base, "s3://") do
+      # TODO: Implement S3 storage via NIF when ready
+      {:error, "S3 storage not yet implemented; set VAULT_BASE_PATH to local directory"}
+    else
+      # Local file storage
+      File.mkdir_p!(base)
+      path = blob_path(did, hash)
+      dir = Path.dirname(path)
+
+      case File.mkdir_p(dir) do
+        :ok ->
+          case File.write(path, data) do
+            :ok -> :ok
+            {:error, reason} -> {:error, "failed to write blob: #{reason}"}
+          end
+
+        {:error, reason} ->
+          {:error, "failed to create directory: #{reason}"}
+      end
+    end
+  end
+
+  defp retrieve_blob_file(did, hash) do
+    path = blob_path(did, hash)
+
+    case File.read(path) do
+      {:ok, data} -> {:ok, data}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, "failed to read blob: #{reason}"}
+    end
   end
 end

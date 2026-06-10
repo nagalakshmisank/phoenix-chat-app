@@ -7,25 +7,26 @@ edition = "2021"
 # It owns: universal CAS, namespace resolver, cross-service metadata schema,
 # and the per-service Lance schema definitions.
 # Service crates (przma-calendar, przma-chat, przma-files, etc.) depend on this.
+#
+# Explicit versions (not workspace = true) so this crate can be consumed by
+# crates outside the przma-vault workspace (e.g. przma-files-offline).
 
 [dependencies]
-przma-calendar = { path = "../przma-calendar" }  # calendar is already built
-
-lancedb     = { workspace = true }
-arrow       = { workspace = true }
-arrow-schema = { workspace = true }
-arrow-array  = { workspace = true }
-blake3       = { workspace = true }
-chrono       = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-tokio        = { workspace = true }
-futures      = { workspace = true }
-uuid         = { workspace = true }
-thiserror    = { workspace = true }
-anyhow       = { workspace = true }
-tracing      = { workspace = true }
+lancedb      = "0.9"
+arrow        = { version = "52", features = ["prettyprint"] }
+arrow-schema = "52"   # must match lancedb 0.9 (arrow 52)
+arrow-array  = "52"   # must match lancedb 0.9 (arrow 52)
+blake3       = "1"
+chrono       = { version = "0.4", features = ["serde"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+tokio        = { version = "1", features = ["full"] }
+futures      = "0.3"
+uuid         = { version = "1", features = ["v4"] }
+thiserror    = "1"
+anyhow       = "1"
+tracing      = "0.1"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile   = "3"
 tokio-test = "0.4"

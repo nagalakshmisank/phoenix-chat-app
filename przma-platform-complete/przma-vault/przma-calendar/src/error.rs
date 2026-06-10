@@ -10,9 +10,6 @@ pub enum CalendarError {
     #[error("Arrow error: {0}")]
     Arrow(String),
 
-    #[error("DuckDB error: {0}")]
-    DuckDb(#[from] duckdb::Error),
-
     #[error("Serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
@@ -33,6 +30,9 @@ pub enum CalendarError {
 
     #[error("CAS error: {0}")]
     Cas(String),
+
+    #[error("Storage error: {0}")]
+    Storage(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

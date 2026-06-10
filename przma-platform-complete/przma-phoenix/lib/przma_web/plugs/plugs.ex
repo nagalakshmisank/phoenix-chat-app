@@ -1,28 +1,4 @@
-# lib/przma_web/plugs/did_auth.ex
-#
-# Plug that verifies DID-based HTTP Signature authentication.
-# Sets conn.assigns.did on success.
-# Returns 401 on failure.
-
-defmodule PRZMAWeb.Plugs.DIDAuth do
-  import Plug.Conn
-  alias PRZMA.Identity
-
-  def init(opts), do: opts
-
-  def call(conn, _opts) do
-    case Identity.verify_http_signature(conn) do
-      {:ok, did} ->
-        assign(conn, :did, did)
-
-      {:error, reason} ->
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(401, Jason.encode!(%{error: "Unauthorized: #{reason}"}))
-        |> halt()
-    end
-  end
-end
+# DIDAuth plug moved to lib/przma_web/plugs/did_auth.ex
 
 # ─────────────────────────────────────────────────────────────────────────────
 

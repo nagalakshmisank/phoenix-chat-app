@@ -28,12 +28,24 @@ config :przma, :instance, [
 ]
 
 # ── Vault storage ─────────────────────────────────────────────────────────────
-base_path = System.get_env("PRZMA_LOCAL_PATH", "/data/vaults")
+#
+# base_path is passed directly to LanceDB (Rust NIF).
+# LanceDB interprets it as:
+#   "/data/vaults"           → local disk
+#   "s3://bucket-name"       → S3-compatible object store (AWS, Linode, R2, MinIO)
+#
+# Rule: if PRZMA_LOCAL_PATH is set → local disk
+#       otherwise                  → S3 (derived from PRZMA_S3_BUCKET)
+s3_bucket = System.get_env("PRZMA_S3_BUCKET", "przma-vaults")
+
+base_path =
+  System.get_env("PRZMA_LOCAL_PATH") ||
+  "s3://#{s3_bucket}"
 
 config :przma, :vault, [
-  base_path: base_path,
+  base_path:     base_path,
   s3_endpoint:   System.get_env("PRZMA_S3_ENDPOINT"),
-  s3_bucket:     System.get_env("PRZMA_S3_BUCKET",  "przma-vaults"),
+  s3_bucket:     s3_bucket,
   s3_region:     System.get_env("PRZMA_S3_REGION",  "us-east-1"),
   s3_access_key: System.get_env("PRZMA_S3_ACCESS_KEY"),
   s3_secret:     System.get_env("PRZMA_S3_SECRET"),

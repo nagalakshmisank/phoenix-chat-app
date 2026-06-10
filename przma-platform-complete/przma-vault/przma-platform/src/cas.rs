@@ -24,7 +24,7 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use crate::error::{PlatformError, PlatformResult};
+use crate::{PlatformError, PlatformResult};
 
 // ─── CAS URI ─────────────────────────────────────────────────────────────────
 
@@ -85,7 +85,10 @@ impl PlatformCas {
     }
 
     fn cas_root(&self) -> PathBuf {
-        self.base_path.join(&self.did).join("cas")
+        // Windows doesn't allow colons in filenames (except drive letter).
+        // DIDs have colons (did:web:alice.com), so sanitize them.
+        let sanitized_did = self.did.replace(':', "_");
+        self.base_path.join(&sanitized_did).join("cas")
     }
 
     fn blob_path(&self, hash: &str) -> PathBuf {
@@ -135,7 +138,7 @@ impl PlatformCas {
             tracing::debug!(hash = %hash, bytes = data.len(), by = written_by, "CAS: wrote blob");
         } else {
             // Blob exists — increment ref count in metadata
-            self.incr_ref_count(&hash).await.ok();
+            let _: Option<()> = self.incr_ref_count(&hash).await.ok();
         }
 
         Ok((CasUri::new(&hash), new))

@@ -1,0 +1,14 @@
+node_modules
+target
+.env
+.env.local
+dist
+build
+src-tauri/target
+.DS_Store
+*.pdb
+*.o
+*.a
+*.so
+*.dylib
+**/Cargo.lock

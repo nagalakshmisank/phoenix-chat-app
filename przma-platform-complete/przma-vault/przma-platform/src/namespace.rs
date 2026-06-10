@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::error::{PlatformError, PlatformResult};
+use crate::{PlatformError, PlatformResult};
 
 // ─── SERVICE REGISTRY ────────────────────────────────────────────────────────
 
@@ -173,12 +173,17 @@ impl PrzmaUri {
         })
     }
 
-    /// Build the Lance table path for this resource
+    /// Build the Lance table name for this resource.
+    /// Lance table names cannot contain slashes or colons.
+    /// Flattens path hierarchy into a single name: base_did_service_space_type
     pub fn lance_table_path(&self, base_path: &str) -> String {
+        let sanitized_did = self.did.replace(':', "_");
+        // Lance expects a simple name, not a path with slashes.
+        // Flatten into: base/did_service_space_type
         format!(
-            "{}/{}/{}/{}/{}",
+            "{}/{}_{}_{}_{}",
             base_path,
-            self.did,
+            sanitized_did,
             self.service.lance_dir(),
             self.space.as_str(),
             self.res_type_to_table(),
@@ -231,8 +236,8 @@ impl UriBuilder {
         PrzmaUri::new(did, ServiceNamespace::Chat, space, "message", id)
     }
 
-    pub fn file(did: &str, id: &str) -> PrzmaUri {
-        PrzmaUri::new(did, ServiceNamespace::Files, Space::Core, "file", id)
+    pub fn file(did: &str, id: &str, space: Space) -> PrzmaUri {
+        PrzmaUri::new(did, ServiceNamespace::Files, space, "file", id)
     }
 
     pub fn companion_memory(did: &str, id: &str) -> PrzmaUri {
@@ -310,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_cross_did_detection() {
-        let uri = UriBuilder::file("did:web:alice.com", "f1");
+        let uri = UriBuilder::file("did:web:alice.com", "f1", Space::Core);
         assert!(!uri.is_cross_did("did:web:alice.com"));
         assert!(uri.is_cross_did("did:web:bob.com"));
     }

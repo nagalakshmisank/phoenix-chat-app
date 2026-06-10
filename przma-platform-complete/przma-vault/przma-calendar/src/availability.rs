@@ -1,9 +1,9 @@
 // przma-calendar/src/availability.rs
 
-use arrow_array::{BooleanArray, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{Array, BooleanArray, Int32Array, Int64Array, RecordBatch, StringArray};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use lancedb::{connect, query::QueryBase, Connection};
+use lancedb::{connect, query::{ExecutableQuery, QueryBase}, Connection};
 use std::sync::Arc;
 
 use crate::{

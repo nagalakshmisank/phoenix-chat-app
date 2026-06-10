@@ -83,7 +83,8 @@ defmodule PRZMA.PzDb do
 
   require Logger
 
-  @base_path Application.compile_env(:przma, [:vault, :base_path], "/var/przma/vaults")
+  # compile_env is baked at build time — use get_env so runtime.exs S3 path is picked up.
+  defp base_path, do: Application.get_env(:przma, :vault)[:base_path] || "/var/przma/vaults"
 
   # ── WRITE ───────────────────────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ defmodule PRZMA.PzDb do
         end
 
       result = WriteRouter.write(did, fn ->
-        NIF.pzdb_upsert(@base_path, table_path, record_json, Jason.encode!(key_cols))
+        NIF.pzdb_upsert(base_path(), table_path, record_json, Jason.encode!(key_cols))
       end)
 
       latency = System.monotonic_time(:microsecond) - start
@@ -150,7 +151,7 @@ defmodule PRZMA.PzDb do
 
       WriteRouter.write(did, fn ->
         NIF.pzdb_batch_upsert(
-          @base_path, table_path,
+          base_path(), table_path,
           Jason.encode!(records),
           Jason.encode!(key_cols)
         )
@@ -170,7 +171,7 @@ defmodule PRZMA.PzDb do
       record_id  = extract_record_id(pzdb_uri)
 
       WriteRouter.write(did, fn ->
-        NIF.pzdb_soft_delete(@base_path, table_path, record_id, deleted_by)
+        NIF.pzdb_soft_delete(base_path(), table_path, record_id, deleted_by)
       end)
       |> case do
         {:ok, json} ->
@@ -219,7 +220,7 @@ defmodule PRZMA.PzDb do
     limit       = opts[:limit]       || 100
     min_version = opts[:min_version] || 0
 
-    case NIF.pzdb_read_many(@base_path, table_path, filter, limit, min_version) do
+    case NIF.pzdb_read_many(base_path(), table_path, filter, limit, min_version) do
       {:ok, json}   -> {:ok, Jason.decode!(json)}
       {:error, msg} -> {:error, msg}
     end
@@ -228,7 +229,7 @@ defmodule PRZMA.PzDb do
   @doc "Get the current manifest version for a pzdb table URI."
   def version(pzdb_table_uri) when is_binary(pzdb_table_uri) do
     table_path = lance_path(pzdb_table_uri)
-    case NIF.pzdb_version(@base_path, table_path) do
+    case NIF.pzdb_version(base_path(), table_path) do
       {:ok, json}   -> {:ok, Jason.decode!(json)}
       {:error, msg} -> {:error, msg}
     end
@@ -268,7 +269,7 @@ defmodule PRZMA.PzDb do
   @doc "Provision a Lance table if it doesn't exist. Idempotent."
   def ensure_table(pzdb_table_uri, schema_name) when is_binary(pzdb_table_uri) do
     table_path = lance_path(pzdb_table_uri)
-    case NIF.pzdb_provision_table(@base_path, table_path, schema_name) do
+    case NIF.pzdb_provision_table(base_path(), table_path, schema_name) do
       {:ok, json}   -> {:ok, Jason.decode!(json)}
       {:error, msg} -> {:error, msg}
     end
@@ -296,7 +297,7 @@ defmodule PRZMA.PzDb do
     table_path = lance_path(pzdb_uri)
     record_id  = extract_record_id(pzdb_uri)
 
-    case NIF.pzdb_read(@base_path, table_path, record_id, min_version) do
+    case NIF.pzdb_read(base_path(), table_path, record_id, min_version) do
       {:ok, json} ->
         result = Jason.decode!(json)
         record = if decrypt? and result["record"] and EncryptionContext.encryption_available?(did) do
@@ -313,7 +314,7 @@ defmodule PRZMA.PzDb do
 
   defp lance_path(pzdb_uri) do
     case PRZMA.PzDb.Uri.parse(pzdb_uri) do
-      {:ok, parsed} -> PRZMA.PzDb.Uri.lance_path(@base_path, parsed)
+      {:ok, parsed} -> PRZMA.PzDb.Uri.lance_path(base_path(), parsed)
       {:error, _}   -> pzdb_uri
     end
   end

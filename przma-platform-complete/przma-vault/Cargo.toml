@@ -3,23 +3,27 @@ resolver = "2"
 members = [
     "przma-calendar",
     "przma-nif",
+    "przma-files",
+    "przma-platform",
 ]
 
 [workspace.dependencies]
-# Arrow / LanceDB
+# Arrow / LanceDB - LanceDB 0.9 bundles Arrow 52.2.0 internally
 lancedb          = "0.9"
-arrow            = { version = "53", features = ["prettyprint"] }
-arrow-schema     = "53"
-arrow-array      = "53"
-arrow-buffer     = "53"
-arrow-cast       = "53"
+arrow            = { version = "=52.2.0", features = ["prettyprint"] }
+arrow-schema     = "=52.2.0"
+arrow-array      = "=52.2.0"
+arrow-buffer     = "=52.2.0"
+arrow-cast       = "=52.2.0"
 
 # Storage / Hashing
 blake3           = "1"
 duckdb           = { version = "1", features = ["bundled"] }
 
 # Time / Recurrence
-chrono           = { version = "0.4", features = ["serde"] }
+# Pinned: chrono >= 0.4.39 adds Datelike::quarter(), which collides with
+# arrow-arith 52.2.0's ChronoDateExt::quarter() (E0034). Keep <= 0.4.38.
+chrono           = { version = "=0.4.38", features = ["serde"] }
 rrule            = "0.13"
 
 # Serde / Async
@@ -33,6 +37,10 @@ uuid             = { version = "1", features = ["v4"] }
 thiserror        = "1"
 anyhow           = "1"
 tracing          = "0.1"
+
+# Object store (S3-compatible: AWS, Linode, Cloudflare R2, MinIO)
+object_store     = { version = "0.11", features = ["aws"] }
+bytes            = "1"
 
 # NIF
 rustler          = "0.33"

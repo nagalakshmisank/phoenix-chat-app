@@ -627,12 +627,51 @@ async fn json_array_to_record_batch(
 }
 
 fn schema_for(name: &str) -> Option<std::sync::Arc<arrow_schema::Schema>> {
-    use przma_calendar::{
-        schema::{calendar_event_schema, calendar_task_schema},
+    // Platform schemas — authoritative source of truth for all 9 services.
+    use przma_platform::services::schemas::{
+        vault, chat, files, metadata, ai, agents, creative, companion,
     };
+    // Calendar schemas — owned by przma-calendar (not in platform).
+    use przma_calendar::schema::{
+        calendar_event_schema, calendar_task_schema,
+        availability_window_schema, booking_link_schema,
+        reminder_schema, scheduling_poll_schema,
+    };
+
     match name {
-        "events"       => Some(calendar_event_schema()),
-        "tasks"        => Some(calendar_task_schema()),
-        _              => None,
+        // vault
+        "entries"            => Some(vault::entry_schema()),
+        "practice_logs"      => Some(vault::practice_log_schema()),
+        // chat
+        "messages"           => Some(chat::message_schema()),
+        "threads"            => Some(chat::thread_schema()),
+        // files
+        "files"              => Some(files::file_schema()),
+        "upload_sessions"    => Some(files::upload_session_schema()),
+        // metadata
+        "references"         => Some(metadata::reference_schema()),
+        "tags"               => Some(metadata::tag_schema()),
+        "search_index"       => Some(metadata::search_index_schema()),
+        // ai
+        "model_registry"     => Some(ai::model_registry_schema()),
+        "inference_log"      => Some(ai::inference_log_schema()),
+        // agents
+        "sessions"           => Some(agents::agent_session_schema()),
+        "execution_logs"     => Some(agents::agent_execution_log_schema()),
+        // creative
+        "projects"           => Some(creative::project_schema()),
+        "assets"             => Some(creative::asset_schema()),
+        // companion
+        "memories"           => Some(companion::memory_schema()),
+        "sapience_snapshots" => Some(companion::sapience_snapshot_schema()),
+        "arc_timeline"       => Some(companion::arc_timeline_schema()),
+        // calendar (przma-calendar)
+        "events"             => Some(calendar_event_schema()),
+        "tasks"              => Some(calendar_task_schema()),
+        "availability"       => Some(availability_window_schema()),
+        "booking_links"      => Some(booking_link_schema()),
+        "reminders"          => Some(reminder_schema()),
+        "polls"              => Some(scheduling_poll_schema()),
+        _                    => None,
     }
 }

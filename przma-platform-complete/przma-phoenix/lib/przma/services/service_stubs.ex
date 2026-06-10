@@ -37,8 +37,6 @@ defmodule PRZMA.Services.Vault do
 
   alias PRZMA.Platform.{CAS, MetadataIndex, ServicesCatalogue}
 
-  @base_path Application.compile_env(:przma, [:vault, :base_path], "/var/przma/vaults")
-
   def create(did, domain, attrs) do
     with {:ok, body_cas} <- CAS.put_text(did, attrs["body"] || "", written_by: "vault") do
       entry = attrs

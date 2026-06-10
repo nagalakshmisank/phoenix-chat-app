@@ -220,4 +220,23 @@ pub mod tables {
     pub const BOOKING_LINKS:&str = "booking_links";
     pub const REMINDERS:    &str = "reminders";
     pub const POLLS:        &str = "polls";
+    pub const CAS:          &str = "cas";
+}
+
+// ─── CAS METADATA TABLE ──────────────────────────────────────────────────────
+// Lance table that indexes every CAS blob written by calendar/files services.
+// Stores ref_count for GC and shareable_link (cas:{hash}) for sharing flows.
+
+pub fn cas_table_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("hash",           DataType::Utf8,   false),
+        Field::new("did",            DataType::Utf8,   false),
+        Field::new("file_name",      DataType::Utf8,   true),
+        Field::new("mime_type",      DataType::Utf8,   true),
+        Field::new("size_bytes",     DataType::UInt64, false),
+        Field::new("created_at",     DataType::Int64,  false),
+        Field::new("created_by",     DataType::Utf8,   false),
+        Field::new("ref_count",      DataType::UInt32, false),
+        Field::new("shareable_link", DataType::Utf8,   false),  // "cas:{hash}"
+    ])))
 }
