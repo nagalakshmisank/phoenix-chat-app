@@ -12,7 +12,7 @@ config :przma, PRZMA.Repo,
   ssl: String.to_existing_atom(System.get_env("DATABASE_SSL") || "false")
 
 # S3 endpoint (MinIO, AWS, or Linode Object Storage)
-s3_endpoint = System.get_env("S3_ENDPOINT", "http://localhost:9000")
+s3_endpoint = System.get_env("S3_ENDPOINT", "https://in-maa-1.linodeobjects.com")
 s3_bucket = System.get_env("S3_BUCKET", "przma-vaults")
 s3_region = System.get_env("S3_REGION", "us-east-1")
 

@@ -24,7 +24,7 @@ config :przma, Oban,
 config :ex_aws,
   access_key_id: System.get_env("AWS_ACCESS_KEY_ID", "minioadmin"),
   secret_access_key: System.get_env("AWS_SECRET_ACCESS_KEY", "minioadmin"),
-  region: System.get_env("AWS_REGION", "us-east-1")
+  region: System.get_env("AWS_REGION", "in-maa-1")
 
 # Development overrides
 if Mix.env() == :dev do

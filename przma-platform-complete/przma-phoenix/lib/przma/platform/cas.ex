@@ -224,7 +224,16 @@ defmodule PRZMA.Platform.CAS do
       path = Path.join([base, Namespace.sanitize_did(did), "cas", shard, hash])
       with :ok <- File.mkdir_p(Path.dirname(path)),
            :ok <- File.write(path, data) do
-        {:ok, "cas:#{hash}"}
+        bucket = System.get_env("PRZMA_S3_BUCKET", "perkeep")
+        key = join_key([Namespace.sanitize_did(did), "cas", shard, hash])
+        case ExAws.S3.put_object(bucket, key, data) |> ExAws.request() do
+          {:ok, _} ->
+            {:ok, "cas:#{hash}"}
+          {:error, reason} ->
+            require Logger
+            Logger.warning("S3 sync failed for #{hash}: #{inspect(reason)}")
+            {:ok, "cas:#{hash}"}
+        end
       else
         {:error, reason} -> {:error, "blob write failed: #{inspect(reason)}"}
       end
