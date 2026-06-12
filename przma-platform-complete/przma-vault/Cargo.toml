@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "przma-calendar",
-    "przma-nif",
+    # "przma-nif",
     "przma-files",
     "przma-platform",
 ]

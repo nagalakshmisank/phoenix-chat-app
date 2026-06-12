@@ -1,12 +1,192 @@
-use rustler::{Atom, Error as NifError, NifResult};
+// native/przma_pzdb_nif/src/lib.rs
+//
+// Real LanceDB-backed NIF for PRZMA.PzDb.NIF.
+//
+// pzdb_provision_table / pzdb_upsert / pzdb_read_many do genuine Lance writes/reads
+// against the `files` schema, producing  {dir}/files.lance/  where
+//   dir = {root}/{sanitized_did}/files/{space}   (resolved by Namespace in Elixir)
+// The other 5 functions stay as stubs ONLY so the module loads — every #[rustler::nif]
+// here must match a `def` of the same name+arity in lib/przma/pzdb/nif.ex.
+//
+// Modeled line-for-line on the proven przma-files/src/store.rs (lancedb 0.9,
+// arrow 52.2.0). NOT compiled in the assistant's sandbox — build it in your
+// container. If `mix compile` dies inside the `lance` crate with a type-recursion
+// overflow, bump lancedb to "0.10" and arrow-* to "53" (the connect/open_table/
+// add/query API used here is unchanged across 0.9 -> 0.10).
+//
+// S3: lancedb reads AWS_ENDPOINT / AWS_DEFAULT_REGION / AWS_ACCESS_KEY_ID /
+// AWS_SECRET_ACCESS_KEY from the OS env. Export them before `mix phx.server`.
+
+use std::sync::{Arc, OnceLock};
+
+use rustler::{Error as NifError, NifResult};
+use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
-mod atoms {
-    rustler::atoms! { ok, error }
+use arrow_array::{
+    BooleanArray, FixedSizeListArray, Float32Array, Int32Array, Int64Array,
+    RecordBatch, RecordBatchIterator, StringArray,
+};
+use arrow_schema::{DataType, Field, Fields, Schema};
+use futures::TryStreamExt;
+use lancedb::connect;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::Table;
+
+const EMBEDDING_DIM: i32 = 768;
+
+// One shared multi-thread runtime for all NIF calls (do NOT build one per call).
+fn rt() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    })
 }
 
-fn rt() -> Runtime {
-    Runtime::new().expect("tokio runtime")
+fn err<E: std::fmt::Display>(e: E) -> NifError {
+    NifError::Term(Box::new(e.to_string()))
+}
+
+fn now_micros() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
+// Canonical 22-column files schema (identical to schema.rs `local_file_schema`).
+fn files_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("did", DataType::Utf8, false),
+        Field::new("space", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("path", DataType::Utf8, false),
+        Field::new("mime_type", DataType::Utf8, false),
+        Field::new("size_bytes", DataType::Int64, false),
+        Field::new("content_cas", DataType::Utf8, false),
+        Field::new("thumbnail_cas", DataType::Utf8, true),
+        Field::new("versions_json", DataType::Utf8, false),
+        Field::new("current_version", DataType::Int32, false),
+        Field::new("tags_json", DataType::Utf8, false),
+        Field::new("source_uri", DataType::Utf8, true),
+        Field::new(
+            "embedding",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, false)),
+                EMBEDDING_DIM,
+            ),
+            false,
+        ),
+        Field::new("is_public", DataType::Boolean, false),
+        Field::new("is_encrypted", DataType::Boolean, false),
+        Field::new("upload_status", DataType::Utf8, false),
+        Field::new("chunk_count", DataType::Int32, true),
+        Field::new("chunks_received", DataType::Int32, true),
+        Field::new("created_at", DataType::Int64, false),
+        Field::new("updated_at", DataType::Int64, false),
+        Field::new("synced", DataType::Boolean, false),
+    ])))
+}
+
+async fn open_or_create(dir: &str, table: &str) -> NifResult<Table> {
+    let conn = connect(dir).execute().await.map_err(err)?;
+    match conn.open_table(table).execute().await {
+        Ok(t) => Ok(t),
+        Err(_) => conn
+            .create_empty_table(table, files_schema())
+            .execute()
+            .await
+            .map_err(err),
+    }
+}
+
+// Build a single-row RecordBatch from the JSON the Elixir side sends.
+// (PzDb.backfill guarantees all non-nullable fields are present.)
+fn json_to_files_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so = |k: &str| v.get(k).and_then(Value::as_str).map(|x| x.to_string());
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let i32d = |k: &str, d: i32| v.get(k).and_then(Value::as_i64).map(|n| n as i32).unwrap_or(d);
+    let i32o = |k: &str| v.get(k).and_then(Value::as_i64).map(|n| n as i32);
+    let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+
+    let mut emb: Vec<f32> = v
+        .get("embedding")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|n| n.as_f64().unwrap_or(0.0) as f32).collect())
+        .unwrap_or_default();
+    emb.resize(EMBEDDING_DIM as usize, 0.0);
+    let emb_array = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, false)),
+        EMBEDDING_DIM,
+        Arc::new(Float32Array::from(emb)),
+        None,
+    )
+    .map_err(err)?;
+
+    RecordBatch::try_new(
+        files_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("did")])),
+            Arc::new(StringArray::from(vec![s("space")])),
+            Arc::new(StringArray::from(vec![s("name")])),
+            Arc::new(StringArray::from(vec![s("path")])),
+            Arc::new(StringArray::from(vec![s("mime_type")])),
+            Arc::new(Int64Array::from(vec![i64v("size_bytes")])),
+            Arc::new(StringArray::from(vec![s("content_cas")])),
+            Arc::new(StringArray::from(vec![so("thumbnail_cas")])),
+            Arc::new(StringArray::from(vec![s("versions_json")])),
+            Arc::new(Int32Array::from(vec![i32d("current_version", 1)])),
+            Arc::new(StringArray::from(vec![s("tags_json")])),
+            Arc::new(StringArray::from(vec![so("source_uri")])),
+            Arc::new(emb_array),
+            Arc::new(BooleanArray::from(vec![b("is_public")])),
+            Arc::new(BooleanArray::from(vec![b("is_encrypted")])),
+            Arc::new(StringArray::from(vec![s("upload_status")])),
+            Arc::new(Int32Array::from(vec![i32o("chunk_count")])),
+            Arc::new(Int32Array::from(vec![i32o("chunks_received")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+            Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+            Arc::new(BooleanArray::from(vec![b("synced")])),
+        ],
+    )
+    .map_err(err)
+}
+
+fn batches_to_json(batches: &[RecordBatch]) -> Vec<Value> {
+    let mut buf = Vec::new();
+    {
+        let mut writer = arrow_json::ArrayWriter::new(&mut buf);
+        for batch in batches {
+            let _ = writer.write(batch);
+        }
+        let _ = writer.finish();
+    }
+    serde_json::from_slice::<Vec<Value>>(&buf).unwrap_or_default()
+}
+
+// Escape single quotes for the SQL-ish filter LanceDB uses.
+fn sql_quote(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+// ── REAL NIFs ────────────────────────────────────────────────────────────────
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_provision_table(
+    base_path: String,
+    table_path: String,
+    _schema_name: String,
+) -> NifResult<String> {
+    rt().block_on(async move {
+        let _ = open_or_create(&base_path, &table_path).await?;
+        Ok(json!({"status": "ok", "table": table_path}).to_string())
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -14,37 +194,21 @@ fn pzdb_upsert(
     base_path: String,
     table_path: String,
     record_json: String,
-    _merge_keys: Vec<String>,
+    _merge_keys: String, // caller passes "id" (a plain string, not a list)
 ) -> NifResult<String> {
     rt().block_on(async move {
-        let record: serde_json::Value = serde_json::from_str(&record_json)
-            .map_err(|e| NifError::Term(Box::new(e.to_string())))?;
-        Ok(serde_json::json!({"status": "ok", "table": table_path, "record": record}).to_string())
-    })
-}
+        let v: Value = serde_json::from_str(&record_json).map_err(err)?;
+        let table = open_or_create(&base_path, &table_path).await?;
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn pzdb_batch_upsert(
-    base_path: String,
-    table_path: String,
-    records_json: String,
-    _merge_keys: Vec<String>,
-) -> NifResult<String> {
-    rt().block_on(async move {
-        let records: Vec<serde_json::Value> = serde_json::from_str(&records_json)
-            .map_err(|e| NifError::Term(Box::new(e.to_string())))?;
-        Ok(serde_json::json!({"status": "ok", "count": records.len()}).to_string())
-    })
-}
+        let id = v.get("id").and_then(Value::as_str).unwrap_or("");
+        // idempotent upsert: remove any existing row with this id, then add
+        let _ = table.delete(&format!("id = '{}'", sql_quote(id))).await;
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn pzdb_query(
-    base_path: String,
-    table_path: String,
-    filter_json: String,
-) -> NifResult<String> {
-    rt().block_on(async move {
-        Ok(serde_json::json!({"status": "ok", "rows": []}).to_string())
+        let batch = json_to_files_batch(&v)?;
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], files_schema());
+        table.add(reader).execute().await.map_err(err)?;
+
+        Ok(json!({"status": "ok", "id": id, "version": now_micros()}).to_string())
     })
 }
 
@@ -52,59 +216,67 @@ fn pzdb_query(
 fn pzdb_read_many(
     base_path: String,
     table_path: String,
-    filter_json: String,
+    filter: String,
     limit: u64,
-    offset: u64,
+    _offset: u64,
 ) -> NifResult<String> {
     rt().block_on(async move {
-        Ok(serde_json::json!({"status": "ok", "rows": [], "total": 0}).to_string())
+        let conn = connect(&base_path).execute().await.map_err(err)?;
+        // Missing table => empty result (not an error).
+        let table = match conn.open_table(&table_path).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(json!({"status": "ok", "records": [], "total": 0}).to_string()),
+        };
+
+        let mut q = table.query().limit(limit as usize);
+        if !filter.trim().is_empty() {
+            q = q.only_if(filter);
+        }
+        let batches: Vec<RecordBatch> =
+            q.execute().await.map_err(err)?.try_collect().await.map_err(err)?;
+
+        let records = batches_to_json(&batches);
+        let total = records.len();
+        Ok(json!({"status": "ok", "records": records, "total": total}).to_string())
     })
 }
 
+// ── STUBS (present only to satisfy the nif.ex contract; not on the upload path) ─
+
 #[rustler::nif(schedule = "DirtyIo")]
-fn pzdb_provision_table(
-    base_path: String,
-    table_path: String,
-    schema_name: String,
+fn pzdb_batch_upsert(
+    _base_path: String,
+    _table_path: String,
+    records_json: String,
+    _merge_keys: String,
 ) -> NifResult<String> {
-    rt().block_on(async move {
-        Ok(serde_json::json!({"status": "ok", "table": table_path, "schema": schema_name}).to_string())
-    })
+    let records: Vec<Value> = serde_json::from_str(&records_json).map_err(err)?;
+    Ok(json!({"status": "ok", "count": records.len()}).to_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn pzdb_delete(
-    base_path: String,
-    table_path: String,
-    filter_json: String,
+fn pzdb_read(_base_path: String, _table_path: String, _record_id: String) -> NifResult<String> {
+    Ok(json!({"status": "ok", "record": null}).to_string())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_soft_delete(
+    _base_path: String,
+    _table_path: String,
+    _record_id: String,
+    _deleted_by: String,
 ) -> NifResult<String> {
-    rt().block_on(async move {
-        Ok(serde_json::json!({"status": "ok"}).to_string())
-    })
+    Ok(json!({"status": "ok"}).to_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn cas_put(
-    base_path: String,
-    did: String,
-    data: Vec<u8>,
-    mime_type: String,
-    written_by: String,
-) -> NifResult<String> {
-    let hash = blake3::hash(&data).to_hex().to_string();
-    Ok(serde_json::json!({"hash": hash, "status": "ok"}).to_string())
+fn pzdb_version(_base_path: String, _table_path: String) -> NifResult<String> {
+    Ok(json!({"status": "ok", "version": 1}).to_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn cas_get(
-    base_path: String,
-    did: String,
-    hash: String,
-) -> NifResult<Vec<u8>> {
-    Ok(vec![])
+fn pzdb_cache_invalidate(_base_path: String, _table_path: String) -> NifResult<String> {
+    Ok(json!({"status": "ok"}).to_string())
 }
 
-rustler::init!(
-    "Elixir.PRZMA.PzDb.NIF",
-    [pzdb_upsert, pzdb_batch_upsert, pzdb_query, pzdb_read_many, pzdb_provision_table, pzdb_delete, cas_put, cas_get]
-);
+rustler::init!("Elixir.PRZMA.PzDb.NIF");

@@ -1,6 +1,7 @@
 // przma-platform/src/lib.rs
 
 pub mod cas;
+pub mod crypto;
 pub mod namespace;
 
 use thiserror::Error;
@@ -36,6 +37,7 @@ pub type PlatformResult<T> = Result<T, PlatformError>;
 
 // Re-exports
 pub use cas::{PlatformCas, CasUri, CasEntry};
+pub use crypto::VaultCipher;
 pub use namespace::{PrzmaUri, ServiceNamespace, Space, UriBuilder};
 
 // Workspace sub-module

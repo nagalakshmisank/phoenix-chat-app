@@ -65,7 +65,7 @@ defmodule PRZMAWeb.FileSyncController do
       }) do
     auth_did = conn.assigns[:did]
 
-    with :ok <- verify_did(auth_did, did),
+    result = with :ok <- verify_did(auth_did, did),
          {:ok, blob_data} <- File.read(tmp_path),
          {:ok, cas_uri} <- CAS.put_blob(did, hash, blob_data) do
       json(conn, %{
@@ -74,10 +74,10 @@ defmodule PRZMAWeb.FileSyncController do
       })
     else
       {:error, :did_mismatch} -> conn |> put_status(403) |> json(%{error: "did_mismatch"})
-      {:error, reason} -> conn |> put_status(500) |> json(%{error: to_string(reason)})
-    after
-      File.rm(tmp_path)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: result_to_string(reason)})
     end
+    File.rm(tmp_path)
+    result
   end
 
   def upload_blob(conn, _params) do
@@ -175,7 +175,7 @@ defmodule PRZMAWeb.FileSyncController do
 
       {:error, reason} ->
         Logger.error("[FileSyncController] record sync failed did=#{rec_did} reason=#{inspect(reason)}")
-        conn |> put_status(500) |> json(%{error: to_string(reason)})
+        conn |> put_status(500) |> json(%{error: result_to_string(reason)})
     end
   end
 
@@ -209,35 +209,38 @@ defmodule PRZMAWeb.FileSyncController do
     did = conn.assigns[:did]
     now_micros = System.os_time(:microsecond)
 
-    # Update queue entry
-    queue_uri = "pzdb://#{did}/files/sync_queue/#{file_id}"
-    queue_record = %{
-      "id" => file_id,
-      "status" => "synced",
-      "synced_at" => now_micros
-    }
-
-    # Update file record
+    # Read-modify-write: fetch the existing record, flip only the two fields,
+    # write the FULL record back. Never send a partial map through PzDb.write —
+    # backfill would fill the missing fields with blanks and wipe real data.
     file_uri = "pzdb://#{did}/files/#{space}/file/#{file_id}"
-    file_update = %{
-      "id" => file_id,
-      "upload_status" => "synced",
-      "updated_at" => now_micros
-    }
+    list_uri = "pzdb://#{did}/files/#{space}/file/placeholder"
 
-    with {:ok, _} <- PzDb.write(queue_uri, queue_record),
-         {:ok, _} <- PzDb.write(file_uri, file_update) do
+    existing =
+      case PzDb.query(list_uri, filter: "id = '#{file_id}'", limit: 1) do
+        {:ok, %{"records" => [rec | _]}} -> rec
+        _ -> nil
+      end
 
-      Logger.info("[FileSyncController] marked synced did=#{did} file=#{file_id} space=#{space}")
+    cond do
+      is_nil(existing) ->
+        conn |> put_status(404) |> json(%{error: "not_found", file_id: file_id})
 
-      json(conn, %{
-        file_id: file_id,
-        status: "synced"
-      })
-    else
-      {:error, reason} ->
-        Logger.error("[FileSyncController] mark_synced failed reason=#{inspect(reason)}")
-        conn |> put_status(500) |> json(%{error: to_string(reason)})
+      true ->
+        updated =
+          existing
+          |> Map.put("upload_status", "synced")
+          |> Map.put("synced", true)
+          |> Map.put("updated_at", now_micros)
+
+        case PzDb.write(file_uri, updated) do
+          {:ok, _} ->
+            Logger.info("[FileSyncController] marked synced did=#{did} file=#{file_id} space=#{space}")
+            json(conn, %{file_id: file_id, status: "synced"})
+
+          {:error, reason} ->
+            Logger.error("[FileSyncController] mark_synced failed reason=#{inspect(reason)}")
+            conn |> put_status(500) |> json(%{error: inspect(reason)})
+        end
     end
   end
 
@@ -294,7 +297,7 @@ defmodule PRZMAWeb.FileSyncController do
 
       {:error, reason} ->
         Logger.error("[FileSyncController] list_remote failed space=#{space} reason=#{inspect(reason)}")
-        conn |> put_status(500) |> json(%{error: to_string(reason)})
+        conn |> put_status(500) |> json(%{error: result_to_string(reason)})
     end
   end
 
@@ -367,26 +370,11 @@ defmodule PRZMAWeb.FileSyncController do
     - PzDb.query(pzdb_queue_uri, filter: "status = 'pending'")
       └─ Returns [SyncQueueEntry, ...]
   """
-  def list_pending(conn, params) do
-    did = conn.assigns[:did]
-    limit = parse_limit(params["limit"])
-
-    pzdb_queue_uri = "pzdb://#{did}/files/sync_queue/placeholder"
-
-    case PzDb.query(pzdb_queue_uri,
-      filter: "status = 'pending'",
-      limit: limit
-    ) do
-      {:ok, %{"records" => pending}} ->
-        json(conn, %{
-          pending_syncs: pending,
-          count: length(pending)
-        })
-
-      {:error, reason} ->
-        Logger.error("[FileSyncController] list_pending failed reason=#{inspect(reason)}")
-        conn |> put_status(500) |> json(%{error: to_string(reason)})
-    end
+  def list_pending(conn, _params) do
+    # Server-side sync queue is not implemented; the client tracks pending
+    # uploads locally. Return an empty list rather than querying a table
+    # ("sync_queue") that is not a valid namespace space.
+    json(conn, %{pending_syncs: [], count: 0})
   end
 
   # ── PRIVATE HELPERS ─────────────────────────────────────────────────────────
@@ -409,6 +397,6 @@ defmodule PRZMAWeb.FileSyncController do
   defp parse_limit(n) when is_binary(n), do: String.to_integer(n)
   defp parse_limit(n) when is_integer(n), do: n
 
-  defp to_string(r) when is_binary(r), do: r
-  defp to_string(r), do: inspect(r)
+  defp result_to_string(r) when is_binary(r), do: r
+  defp result_to_string(r), do: inspect(r)
 end

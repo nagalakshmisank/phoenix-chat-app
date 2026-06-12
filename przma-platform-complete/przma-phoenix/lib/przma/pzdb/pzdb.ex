@@ -27,7 +27,7 @@ defmodule PRZMA.PzDb do
     record = backfill(record)
 
     case NIF.pzdb_upsert(dir, table, Jason.encode!(record), "id") do
-      {:ok, json} -> {:ok, Jason.decode!(json)}
+      json when is_binary(json) -> {:ok, Jason.decode!(json)}
       {:error, msg} -> {:error, msg}
     end
   end
@@ -41,7 +41,7 @@ defmodule PRZMA.PzDb do
     limit = Keyword.get(opts, :limit, 500)
 
     case NIF.pzdb_read_many(dir, table, filter, limit, 0) do
-      {:ok, json} -> {:ok, Jason.decode!(json)}
+      json when is_binary(json) -> {:ok, Jason.decode!(json)}
       {:error, msg} -> {:error, msg}
     end
   end
@@ -56,7 +56,7 @@ defmodule PRZMA.PzDb do
     {dir, table} = Namespace.resolve(root(), pzdb_table_uri)
 
     case NIF.pzdb_provision_table(dir, table, schema_name) do
-      {:ok, _} -> :ok
+      json when is_binary(json) -> :ok
       {:error, msg} -> {:error, msg}
     end
   end

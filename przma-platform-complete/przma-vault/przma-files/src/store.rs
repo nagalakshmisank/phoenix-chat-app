@@ -9,7 +9,6 @@ use arrow_array::{
 use futures::TryStreamExt;
 use lancedb::{connect, Table};
 use lancedb::query::{ExecutableQuery, QueryBase};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::{FilesError, FilesResult};
@@ -33,18 +32,15 @@ impl FileStore {
         })
     }
 
-    fn resolve_db_path(&self, space: &Space) -> String {
+    /// Single Lance table per user. Space is a column on each row, not a
+    /// directory — callers filter by `space` in their queries.
+    fn resolve_db_path(&self) -> String {
         let sanitized_did = self.did.replace(':', "_");
-        let space_segment = match space {
-            Space::Core => "core".to_string(),
-            Space::Commons => "commons".to_string(),
-            Space::Circle(c) => format!("circles/{}", c),
-        };
-        format!("{}/{}/files/{}", self.base_path, sanitized_did, space_segment)
+        format!("{}/{}/files", self.base_path, sanitized_did)
     }
 
-    async fn open_or_create_table(&self, space: &Space) -> FilesResult<Table> {
-        let db_path = self.resolve_db_path(space);
+    async fn open_or_create_table(&self) -> FilesResult<Table> {
+        let db_path = self.resolve_db_path();
         let conn = connect(&db_path)
             .execute()
             .await
@@ -82,9 +78,7 @@ impl FileStore {
     }
 
     pub async fn create(&self, file: &FileRecord) -> FilesResult<String> {
-        let space = Space::try_from(file.space.as_str())
-            .map_err(|e| FilesError::Storage(format!("Invalid space: {}", e)))?;
-        let table = self.open_or_create_table(&space).await?;
+        let table = self.open_or_create_table().await?;
         let batch = file_record_to_batch(file)?;
 
         // Delete any existing record with the same ID first (idempotent write)
@@ -100,8 +94,9 @@ impl FileStore {
         Ok(file.id.clone())
     }
 
-    pub async fn get(&self, id: &str, space: &Space) -> FilesResult<FileRecord> {
-        let table = self.open_or_create_table(space).await?;
+    pub async fn get(&self, id: &str, _space: &Space) -> FilesResult<FileRecord> {
+        // id is a globally-unique UUID, so we don't need the space to locate it.
+        let table = self.open_or_create_table().await?;
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", id))
@@ -122,7 +117,28 @@ impl FileStore {
     }
 
     pub async fn list(&self, space: &Space) -> FilesResult<Vec<FileRecord>> {
-        let table = self.open_or_create_table(space).await?;
+        let table = self.open_or_create_table().await?;
+        // Filter to the requested space — single table holds all spaces.
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(format!("space = '{}'", space.as_str()))
+            .execute()
+            .await
+            .map_err(|e| FilesError::Storage(format!("Query failed: {}", e)))?
+            .try_collect()
+            .await
+            .map_err(|e| FilesError::Storage(format!("Stream collection failed: {}", e)))?;
+
+        let mut files = vec![];
+        for batch in batches {
+            files.extend(batch_to_files(batch)?);
+        }
+        Ok(files)
+    }
+
+    /// List every file across all spaces for this user (single-table convenience).
+    pub async fn list_all(&self) -> FilesResult<Vec<FileRecord>> {
+        let table = self.open_or_create_table().await?;
         let batches: Vec<RecordBatch> = table
             .query()
             .execute()
@@ -140,9 +156,7 @@ impl FileStore {
     }
 
     pub async fn update(&self, file: &FileRecord) -> FilesResult<()> {
-        let space = Space::try_from(file.space.as_str())
-            .map_err(|e| FilesError::Storage(format!("Invalid space: {}", e)))?;
-        let table = self.open_or_create_table(&space).await?;
+        let table = self.open_or_create_table().await?;
         let batch = file_record_to_batch(file)?;
 
         // Delete old record and insert updated
@@ -159,8 +173,8 @@ impl FileStore {
         Ok(())
     }
 
-    pub async fn delete(&self, id: &str, space: &Space) -> FilesResult<()> {
-        let table = self.open_or_create_table(space).await?;
+    pub async fn delete(&self, id: &str, _space: &Space) -> FilesResult<()> {
+        let table = self.open_or_create_table().await?;
         table.delete(&format!("id = '{}'", id))
             .await
             .map_err(|e| FilesError::Storage(format!("Delete failed: {}", e)))?;
@@ -174,58 +188,41 @@ impl FileStore {
         Ok(())
     }
 
-    fn list_circles(&self) -> Vec<String> {
-        let sanitized_did = self.did.replace(':', "_");
-        let circles_dir = PathBuf::from(&self.base_path)
-            .join(&sanitized_did)
-            .join("files")
-            .join("circles");
+    /// All unsynced files pending backend sync (Core → object store when online, Commons/Circle → backend when online).
+    /// Single-table query, no directory scan. Sync worker respects is_online before actually syncing.
+    pub async fn pending_syncs(&self) -> FilesResult<Vec<FileRecord>> {
+        let table = self.open_or_create_table().await?;
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if("synced = false")
+            .execute()
+            .await
+            .map_err(|e| FilesError::Storage(format!("Query failed: {}", e)))?
+            .try_collect()
+            .await
+            .map_err(|e| FilesError::Storage(format!("Stream collection failed: {}", e)))?;
 
-        let mut circles = vec![];
-        if let Ok(mut entries) = std::fs::read_dir(circles_dir) {
-            while let Some(Ok(entry)) = entries.next() {
-                if entry.path().is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        circles.push(name.to_string());
-                    }
-                }
-            }
+        let mut pending = vec![];
+        for batch in batches {
+            pending.extend(batch_to_files(batch)?);
         }
-        circles
+        Ok(pending)
     }
 
-    pub async fn pending_syncs(&self) -> FilesResult<Vec<FileRecord>> {
-        let mut pending = vec![];
-
-        // 0. Core  ← core now syncs to the backend too
-        if let Ok(files) = self.list(&Space::Core).await {
-            for f in files {
-                if !f.synced {
-                    pending.push(f);
-                }
-            }
-        }
-        // 1. Check Commons
-        if let Ok(files) = self.list(&Space::Commons).await {
-            for f in files {
-                if !f.synced {
-                    pending.push(f);
-                }
-            }
-        }
-
-        // 2. Check Circles
-        for circle in self.list_circles() {
-            if let Ok(files) = self.list(&Space::Circle(circle)).await {
-                for f in files {
-                    if !f.synced {
-                        pending.push(f);
-                    }
-                }
-            }
-        }
-
-        Ok(pending)
+    /// Compact the files table — merges the small fragment files that every
+    /// add/delete/update creates into larger ones. Run periodically to keep
+    /// read/write performance from degrading over time.
+    pub async fn compact(&self) -> FilesResult<()> {
+        let table = self.open_or_create_table().await?;
+        table
+            .optimize(lancedb::table::OptimizeAction::Compact {
+                options: Default::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(|e| FilesError::Storage(format!("Compaction failed: {}", e)))?;
+        tracing::debug!("Files table compacted");
+        Ok(())
     }
 }
 

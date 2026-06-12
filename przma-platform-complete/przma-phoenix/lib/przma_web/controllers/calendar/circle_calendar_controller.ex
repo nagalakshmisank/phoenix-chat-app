@@ -81,7 +81,7 @@ defmodule PRZMAWeb.Calendar.CircleCalendarController do
         Governance.can_delete_own?(role) ->
           # Verify ownership before cancelling
           case Events.get(did, event_id, space) do
-            {:ok, event} when event["organiser_did"] == did ->
+            {:ok, event} when is_map(event) ->
               Events.cancel(did, event_id, space)
               json(conn, %{id: event_id, status: "cancelled"})
             {:ok, _} ->

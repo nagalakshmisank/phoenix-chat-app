@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Core APIs plus the native file-open dialog for streaming ingest.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}

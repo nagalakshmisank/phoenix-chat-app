@@ -1,0 +1,36 @@
+[package]
+name    = "przma-platform"
+version = "0.1.0"
+edition = "2021"
+
+# przma-platform sits above all service crates.
+# It owns: universal CAS, namespace resolver, cross-service metadata schema,
+# and the per-service Lance schema definitions.
+# Service crates (przma-calendar, przma-chat, przma-files, etc.) depend on this.
+#
+# Explicit versions (not workspace = true) so this crate can be consumed by
+# crates outside the przma-vault workspace (e.g. przma-files-offline).
+
+[dependencies]
+lancedb      = "0.9"
+arrow        = { version = "52", features = ["prettyprint"] }
+arrow-schema = "52"   # must match lancedb 0.9 (arrow 52)
+arrow-array  = "52"   # must match lancedb 0.9 (arrow 52)
+blake3       = "1"
+chrono       = { version = "0.4", features = ["serde"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+tokio        = { version = "1", features = ["full"] }
+futures      = "0.3"
+uuid         = { version = "1", features = ["v4"] }
+thiserror    = "1"
+anyhow       = "1"
+tracing      = "0.1"
+
+# At-rest encryption (streaming AEAD for private blobs)
+chacha20poly1305 = { version = "0.10", features = ["stream"] }
+rand             = "0.8"
+
+[dev-dependencies]
+tempfile   = "3"
+tokio-test = "0.4"

@@ -10,7 +10,7 @@ use tokio::fs;
 use futures::TryStreamExt;
 use lancedb::connect;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array, Int64Array, UInt32Array, BooleanArray};
+use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array, Int64Array, UInt32Array};
 use crate::error::{CalendarError, CalendarResult};
 use crate::schema::{cas_table_schema, tables};
 

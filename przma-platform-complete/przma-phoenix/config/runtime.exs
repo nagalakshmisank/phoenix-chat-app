@@ -14,7 +14,11 @@ config :przma, PRZMA.Repo,
 # S3 endpoint (MinIO, AWS, or Linode Object Storage)
 s3_endpoint = System.get_env("S3_ENDPOINT", "https://in-maa-1.linodeobjects.com")
 s3_bucket = System.get_env("S3_BUCKET", "przma-vaults")
-s3_region = System.get_env("S3_REGION", "us-east-1")
+s3_region =
+  System.get_env("S3_REGION") ||
+    System.get_env("AWS_DEFAULT_REGION") ||
+    System.get_env("AWS_REGION") ||
+    "in-maa-1"
 
 config :przma, :s3_bucket, s3_bucket
 

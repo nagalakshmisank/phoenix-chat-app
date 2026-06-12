@@ -79,6 +79,10 @@ function formatDate(iso?: string): string {
   } catch { return ''; }
 }
 
+function basenameOf(p: string): string {
+  return p.split(/[\\/]/).pop() || p;
+}
+
 let toastId = 0;
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -117,15 +121,36 @@ export default function App() {
 
   // ─── Online/Offline ──────────────────────────────────────────────────────
   useEffect(() => {
-    const goOnline = () => setIsOnline(true);
-    const goOffline = () => {
+    const goOnline = async () => {
+      setIsOnline(true);
+      // Notify sync worker that we're back online
+      if (window.__TAURI__) {
+        try {
+          await window.__TAURI__.core.invoke('set_online_status', { online: true });
+        } catch (e) {
+          console.error('Failed to notify online status:', e);
+        }
+      }
+      addToast('Back online — syncing files', 'success');
+    };
+
+    const goOffline = async () => {
       setIsOnline(false);
+      // Notify sync worker that we're offline
+      if (window.__TAURI__) {
+        try {
+          await window.__TAURI__.core.invoke('set_online_status', { online: false });
+        } catch (e) {
+          console.error('Failed to notify offline status:', e);
+        }
+      }
       // If on a sharing page, redirect to mine
       if (page === 'commons' || page === 'circle') {
         setPage('mine');
-        addToast('Switched to Mine — you are offline', 'info');
+        addToast('Offline — switched to Mine', 'info');
       }
     };
+
     window.addEventListener('online', goOnline);
     window.addEventListener('offline', goOffline);
     return () => {
@@ -307,7 +332,62 @@ export default function App() {
     }
   };
 
-  const onBrowseClick = () => {
+  // ─── Streaming upload by path (efficient: no base64, no buffering) ─────────
+  const uploadPaths = async (paths: string[]) => {
+    if (paths.length === 0) return;
+    const space = getSpace();
+    setIsUploading(true);
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (let i = 0; i < paths.length; i++) {
+      const p = paths[i];
+      const name = basenameOf(p);
+      setUploadProgress({ current: i + 1, total: paths.length, fileName: name });
+      try {
+        const result = await window.__TAURI__!.core.invoke('upload_file_from_path', {
+          fileName: name,
+          filePath: '/',
+          space,
+          mimeType: '', // Rust infers / defaults
+          srcPath: p,
+        });
+        if (result.success) successCount++;
+      } catch (err) {
+        errorCount++;
+        console.error('Upload error:', err);
+      }
+    }
+
+    setIsUploading(false);
+    setUploadProgress({ current: 0, total: 0, fileName: '' });
+    if (errorCount > 0) {
+      addToast(`Uploaded ${successCount}/${paths.length} — ${errorCount} failed`, 'error');
+    } else {
+      addToast(`Uploaded ${successCount} file${successCount > 1 ? 's' : ''}`, 'success');
+    }
+    loadFiles();
+  };
+
+  const onBrowseClick = async () => {
+    // Prefer the native dialog → real filesystem paths → streamed straight from
+    // disk in Rust (no base64 inflation, no full-file buffering).
+    if (window.__TAURI__) {
+      try {
+        const selected = await window.__TAURI__.core.invoke('plugin:dialog|open', {
+          options: { multiple: true, directory: false, title: 'Select files to upload' },
+        });
+        if (selected == null) return; // user cancelled
+        const paths = Array.isArray(selected) ? selected : [selected];
+        if (paths.length > 0) {
+          await uploadPaths(paths);
+          return;
+        }
+      } catch (e) {
+        console.error('Native dialog unavailable, falling back to base64 input:', e);
+      }
+    }
+    // Fallback: HTML file input → base64 ingest (small files / no Tauri).
     fileInputRef.current?.click();
   };
 

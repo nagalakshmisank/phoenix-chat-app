@@ -1,0 +1,640 @@
+// przma-platform/src/cas.rs
+//
+// Universal Content-Addressable Storage for the PRZMA platform.
+//
+// A single BLAKE3-keyed CAS per user vault, shared across ALL services and spaces.
+// The blob is stored ONCE; the cas_index LanceDB table records the metadata
+// (owning URI, resource type, space, ref-count, S3 sync state). Uploads default
+// to the `core` space. Blobs are mirrored to Linode Object Storage on demand.
+//
+// Physical layout (local, working copy):
+//   {base}/{did}/cas/index/            ← LanceDB cas_index table (metadata)
+//   {base}/{did}/cas/{shard_2}/{hash}  ← the blob, BLAKE3-named, deduped
+//
+// Linode mirror (durable copy), same key scheme:
+//   s3://{bucket}/{did}/cas/{shard_2}/{hash}
+ 
+use std::path::PathBuf;
+use std::sync::Arc;
+ 
+use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use bytes::Bytes;
+use futures::TryStreamExt;
+use lancedb::{connect, query::{ExecutableQuery, QueryBase}};
+use object_store::{aws::AmazonS3Builder, path::Path as S3Path, ObjectStore, PutPayload};
+use serde::{Deserialize, Serialize};
+use tokio::fs;
+ 
+use crate::error::{PlatformError, PlatformResult};
+use crate::namespace::{PrzmaUri, ServiceNamespace, Space};
+use crate::services::schemas::cas::cas_index_schema;
+ 
+// ─── CAS URI ─────────────────────────────────────────────────────────────────
+ 
+/// A fully-qualified CAS reference. Format: `cas:{blake3_hex_64}`
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CasUri(pub String);
+ 
+impl CasUri {
+    pub fn new(hash: &str) -> Self {
+        Self(format!("cas:{}", hash))
+    }
+ 
+    pub fn hash(&self) -> &str {
+        self.0.strip_prefix("cas:").unwrap_or(&self.0)
+    }
+ 
+    pub fn is_valid(&self) -> bool {
+        let h = self.hash();
+        h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
+    }
+}
+ 
+impl std::fmt::Display for CasUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+ 
+// ─── CAS METADATA (one LanceDB row per blob) ──────────────────────────────────
+ 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CasEntry {
+    pub hash:         String,         // BLAKE3 hex — primary key
+    pub did:          String,
+    pub uri:          Option<String>, // przma:// URI of the owning resource
+    pub uri_type:     Option<String>, // resource type: "file" | "entry" | "message" | ...
+    pub space:        String,         // "core" (default) | "circle" | "commons"
+    pub size_bytes:   u64,
+    pub mime_type:    Option<String>,
+    pub created_by:   String,         // service namespace that wrote this blob
+    pub ref_count:    u32,            // how many service records reference this hash
+    pub is_encrypted: bool,
+    pub synced_to_s3: bool,           // true once mirrored to Linode
+    pub created_at:   i64,            // Unix micros
+    pub updated_at:   i64,
+}
+ 
+// ─── PLATFORM CAS ────────────────────────────────────────────────────────────
+ 
+pub struct PlatformCas {
+    base_path: PathBuf,
+    did:       String,
+    s3:        Option<Arc<dyn ObjectStore>>, // None = local-only
+}
+ 
+impl PlatformCas {
+    /// Local-only CAS (no replication target).
+    pub fn new(base_path: impl Into<PathBuf>, did: impl Into<String>) -> Self {
+        Self { base_path: base_path.into(), did: did.into(), s3: None }
+    }
+ 
+    /// CAS with a Linode (S3-compatible) replication target.
+    pub fn with_s3(
+        base_path: impl Into<PathBuf>,
+        did:       impl Into<String>,
+        s3:        Arc<dyn ObjectStore>,
+    ) -> Self {
+        Self { base_path: base_path.into(), did: did.into(), s3: Some(s3) }
+    }
+ 
+    // ── PATHS ────────────────────────────────────────────────────────────────
+ 
+    fn cas_root(&self) -> PathBuf {
+        self.base_path.join(&self.did).join("cas")
+    }
+ 
+    fn blob_path(&self, hash: &str) -> PathBuf {
+        self.cas_root().join(&hash[..2]).join(hash)
+    }
+ 
+    fn index_table_path(&self) -> String {
+        self.cas_root().join("index").to_string_lossy().to_string()
+    }
+ 
+    fn s3_key(&self, hash: &str) -> S3Path {
+        S3Path::from(format!("{}/cas/{}/{}", self.did, &hash[..2], hash))
+    }
+ 
+    // ── LANCEDB INDEX HELPERS ──────────────────────────────────────────────────
+ 
+    /// Open (or create) the per-DID cas_index table.
+    async fn index_table(&self) -> PlatformResult<lancedb::Table> {
+        // Make sure {did}/cas/ exists before LanceDB writes into it.
+        fs::create_dir_all(self.cas_root()).await.ok();
+ 
+        let conn = connect(&self.cas_root().to_string_lossy()).execute().await?;
+        match conn.open_table("index").execute().await {
+            Ok(t)  => Ok(t),
+            Err(_) => Ok(conn.create_empty_table("index", cas_index_schema()).execute().await?),
+        }
+    }
+ 
+    async fn read_entry(&self, hash: &str) -> PlatformResult<Option<CasEntry>> {
+        let table = self.index_table().await?;
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(format!("hash = '{}'", hash))
+            .limit(1)
+            .execute()
+            .await?
+            .try_collect()
+            .await
+            .map_err(|e| PlatformError::Arrow(e.to_string()))?;
+ 
+        Ok(batches
+            .into_iter()
+            .next()
+            .and_then(|b| batch_to_entries(b).ok())
+            .and_then(|mut v| v.pop()))
+    }
+ 
+    /// Upsert one row (delete-then-add, same idiom as social.rs).
+    async fn write_entry(&self, e: &CasEntry) -> PlatformResult<()> {
+        let table = self.index_table().await?;
+        table.delete(&format!("hash = '{}'", e.hash)).await.ok();
+        let batch = entry_to_batch(e)?;
+	let schema = batch.schema();
+	let reader =RecordBatchIterator::new(vec![Ok(batch)], schema);
+	table.add(reader).execute().await?;
+        Ok(())
+    }
+ 
+    async fn incr_ref_count(&self, hash: &str) -> PlatformResult<()> {
+        if let Some(mut e) = self.read_entry(hash).await? {
+            e.ref_count += 1;
+            e.updated_at = now_micros();
+            self.write_entry(&e).await?;
+        }
+        Ok(())
+    }
+ 
+    // ── WRITE ──────────────────────────────────────────────────────────────────
+ 
+    /// Store bytes with no owning resource (uri/uri_type null, space = "core").
+    /// Idempotent: a second write of identical bytes bumps ref_count instead of
+    /// storing a second copy.
+    pub async fn put(
+        &self,
+        data:       &[u8],
+        mime_type:  Option<&str>,
+        written_by: &str,
+    ) -> PlatformResult<(CasUri, bool)> {
+        self.put_inner(data, mime_type, written_by, None).await
+    }
+ 
+    /// Store bytes that belong to a specific resource. Records uri/uri_type/space
+    /// from the owning PrzmaUri.
+    pub async fn put_for(
+        &self,
+        data:       &[u8],
+        mime_type:  Option<&str>,
+        written_by: &str,
+        owner:      &PrzmaUri,
+    ) -> PlatformResult<(CasUri, bool)> {
+        self.put_inner(data, mime_type, written_by, Some(owner)).await
+    }
+ 
+    async fn put_inner(
+        &self,
+        data:       &[u8],
+        mime_type:  Option<&str>,
+        written_by: &str,
+        owner:      Option<&PrzmaUri>,
+    ) -> PlatformResult<(CasUri, bool)> {
+        let hash = hash_bytes(data);
+        let path = self.blob_path(&hash);
+        let new  = !path.exists();
+ 
+        if new {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            // Data is pre-encrypted by the Elixir encryption layer before put().
+            fs::write(&path, data).await?;
+ 
+            let now = now_micros();
+            let entry = CasEntry {
+                hash:         hash.clone(),
+                did:          self.did.clone(),
+                uri:          owner.map(|u| u.to_string()),
+                uri_type:     owner.map(|u| u.res_type.clone()),
+                space:        owner.map(|u| u.space.as_str()).unwrap_or_else(|| "core".to_string()),
+                size_bytes:   data.len() as u64,
+                mime_type:    mime_type.map(|s| s.to_string()),
+                created_by:   written_by.to_string(),
+                ref_count:    1,
+                is_encrypted: true,
+                synced_to_s3: false,
+                created_at:   now,
+                updated_at:   now,
+            };
+            self.write_entry(&entry).await?;
+            tracing::debug!(hash = %hash, bytes = data.len(), by = written_by, "CAS: wrote blob");
+        } else {
+            // Same bytes already stored → dedup: bump the reference count.
+            self.incr_ref_count(&hash).await.ok();
+            tracing::debug!(hash = %hash, "CAS: dedup hit, ref_count incremented");
+        }
+ 
+        Ok((CasUri::new(&hash), new))
+    }
+ 
+    pub async fn put_text(&self, text: &str, written_by: &str) -> PlatformResult<CasUri> {
+        let (uri, _) = self.put(text.as_bytes(), Some("text/plain"), written_by).await?;
+        Ok(uri)
+    }
+ 
+    pub async fn put_json<T: Serialize>(&self, value: &T, written_by: &str) -> PlatformResult<CasUri> {
+        let bytes = serde_json::to_vec(value)?;
+        let (uri, _) = self.put(&bytes, Some("application/json"), written_by).await?;
+        Ok(uri)
+    }
+ 
+    // ── UPLOAD (FILES SERVICE ENTRY POINTS) ──────────────────────────────────────
+ 
+    /// Upload a file into a chosen space. Returns (resource URI, cas: URI).
+    /// The files service writes its files/{space}/ record using these.
+    pub async fn upload_file(
+        &self,
+        space: Space,
+        name:  &str,
+        mime:  &str,
+        data:  &[u8],
+    ) -> PlatformResult<(PrzmaUri, CasUri)> {
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let owner   = PrzmaUri::new(&self.did, ServiceNamespace::Files, space, "file", &file_id);
+        tracing::debug!(file = %name, space = %owner.space.as_str(), "CAS: upload_file");
+        let (cas_uri, _new) = self.put_for(data, Some(mime), "files", &owner).await?;
+        Ok((owner, cas_uri))
+    }
+ 
+    /// Upload a file into the default (core) space.
+    pub async fn upload_file_core(
+        &self,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> PlatformResult<(PrzmaUri, CasUri)> {
+        self.upload_file(Space::Core, name, mime, data).await
+    }
+ 
+    // ── READ ─────────────────────────────────────────────────────────────────
+ 
+    pub async fn get(&self, uri: &CasUri) -> PlatformResult<Vec<u8>> {
+        let path = self.blob_path(uri.hash());
+        fs::read(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PlatformError::CasNotFound(uri.to_string())
+            } else {
+                PlatformError::Io(e)
+            }
+        })
+    }
+ 
+    pub async fn get_text(&self, uri: &CasUri) -> PlatformResult<String> {
+        let bytes = self.get(uri).await?;
+        String::from_utf8(bytes).map_err(|e| PlatformError::Encoding(e.to_string()))
+    }
+ 
+    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, uri: &CasUri) -> PlatformResult<T> {
+        let bytes = self.get(uri).await?;
+        serde_json::from_slice(&bytes).map_err(PlatformError::Serde)
+    }
+ 
+    /// Read metadata from the LanceDB cas_index table.
+    pub async fn get_meta(&self, uri: &CasUri) -> PlatformResult<CasEntry> {
+        self.read_entry(uri.hash())
+            .await?
+            .ok_or_else(|| PlatformError::CasNotFound(format!("meta:{}", uri.hash())))
+    }
+ 
+    /// Existence check hits the filesystem (the blob is the source of truth).
+    pub async fn exists(&self, uri: &CasUri) -> bool {
+        self.blob_path(uri.hash()).exists()
+    }
+ 
+    // ── DEREF ────────────────────────────────────────────────────────────────
+ 
+    /// Decrement ref count. At 0 the blob becomes eligible for GC.
+    /// Call when a service record holding this CAS reference is deleted.
+    pub async fn deref(&self, uri: &CasUri) -> PlatformResult<u32> {
+        match self.read_entry(uri.hash()).await? {
+            Some(mut e) => {
+                e.ref_count = e.ref_count.saturating_sub(1);
+                e.updated_at = now_micros();
+                self.write_entry(&e).await?;
+                Ok(e.ref_count)
+            }
+            None => Ok(0),
+        }
+    }
+ 
+    // ── REPLICATE TO LINODE ──────────────────────────────────────────────────
+ 
+    /// Push every blob with synced_to_s3 = false up to Linode, then flip the flag.
+    /// Run after an upload, or on a periodic job.
+    pub async fn replicate_unsynced(&self) -> PlatformResult<u64> {
+        let store = self
+            .s3
+            .as_ref()
+            .ok_or_else(|| PlatformError::S3("no S3 backend configured".into()))?;
+ 
+        let table = self.index_table().await?;
+        let pending: Vec<CasEntry> = table
+            .query()
+            .only_if("synced_to_s3 = false".to_string())
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| PlatformError::Arrow(e.to_string()))?
+            .into_iter()
+            .flat_map(|b| batch_to_entries(b).unwrap_or_default())
+            .collect();
+ 
+        let mut n = 0u64;
+        for mut e in pending {
+            let bytes = fs::read(self.blob_path(&e.hash)).await?;
+            store
+                .put(&self.s3_key(&e.hash), PutPayload::from(Bytes::from(bytes)))
+                .await
+                .map_err(|err| PlatformError::S3(err.to_string()))?;
+ 
+            e.synced_to_s3 = true;
+            e.updated_at = now_micros();
+            self.write_entry(&e).await?;
+            n += 1;
+        }
+        tracing::info!(did = %self.did, replicated = n, "CAS → Linode sync done");
+        Ok(n)
+    }
+ 
+    // ── GC ───────────────────────────────────────────────────────────────────
+ 
+    /// Delete all blobs with ref_count <= 0 from local disk, Linode, and the index.
+    pub async fn gc(&self) -> PlatformResult<GcReport> {
+        let table = self.index_table().await?;
+        let dead: Vec<CasEntry> = table
+            .query()
+            .only_if("ref_count <= 0".to_string())
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| PlatformError::Arrow(e.to_string()))?
+            .into_iter()
+            .flat_map(|b| batch_to_entries(b).unwrap_or_default())
+            .collect();
+ 
+        let (mut deleted, mut freed, mut errors) = (0u64, 0u64, 0u64);
+        for e in &dead {
+            let local_ok = fs::remove_file(self.blob_path(&e.hash)).await.is_ok();
+ 
+            let s3_ok = if e.synced_to_s3 {
+                match &self.s3 {
+                    Some(store) => store.delete(&self.s3_key(&e.hash)).await.is_ok(),
+                    None        => true, // nothing to delete remotely
+                }
+            } else {
+                true
+            };
+ 
+            if local_ok && s3_ok {
+                deleted += 1;
+                freed += e.size_bytes;
+            } else {
+                errors += 1;
+            }
+        }
+ 
+        // Drop the index rows in one bulk delete.
+        table.delete("ref_count <= 0").await.ok();
+ 
+        tracing::info!(deleted = deleted, freed_bytes = freed, errors = errors, "CAS GC complete");
+        Ok(GcReport { deleted_blobs: deleted, freed_bytes: freed, errors })
+    }
+}
+ 
+#[derive(Debug, Default)]
+pub struct GcReport {
+    pub deleted_blobs: u64,
+    pub freed_bytes:   u64,
+    pub errors:        u64,
+}
+ 
+// ─── LINODE S3 BACKEND ───────────────────────────────────────────────────────
+ 
+/// Build an S3-compatible object store from env vars (Linode Object Storage).
+///
+/// Required:
+///   PRZMA_S3_BUCKET, PRZMA_S3_ACCESS_KEY, PRZMA_S3_SECRET_KEY
+/// Optional (with Chennai defaults):
+///   PRZMA_S3_ENDPOINT  (default https://in-maa-1.linodeobjects.com)
+///   PRZMA_S3_REGION    (default in-maa-1)
+pub fn linode_store_from_env() -> PlatformResult<Arc<dyn ObjectStore>> {
+    let env = |k: &str| std::env::var(k).map_err(|_| PlatformError::S3(format!("{k} unset")));
+ 
+    let store = AmazonS3Builder::new()
+        .with_endpoint(
+            std::env::var("PRZMA_S3_ENDPOINT")
+                .unwrap_or_else(|_| "https://in-maa-1.linodeobjects.com".to_string()),
+        )
+        .with_region(std::env::var("PRZMA_S3_REGION").unwrap_or_else(|_| "in-maa-1".to_string()))
+        .with_bucket_name(env("PRZMA_S3_BUCKET")?)
+        .with_access_key_id(env("PRZMA_S3_ACCESS_KEY")?)
+        .with_secret_access_key(env("PRZMA_S3_SECRET_KEY")?)
+        .with_virtual_hosted_style_request(true) // {bucket}.in-maa-1.linodeobjects.com
+        .build()
+        .map_err(|e| PlatformError::S3(e.to_string()))?;
+ 
+    Ok(Arc::new(store))
+}
+ 
+// ─── ARROW <-> CasEntry ──────────────────────────────────────────────────────
+ 
+fn entry_to_batch(e: &CasEntry) -> PlatformResult<RecordBatch> {
+    RecordBatch::try_new(
+        cas_index_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![e.hash.as_str()])),
+            Arc::new(StringArray::from(vec![e.did.as_str()])),
+            Arc::new(StringArray::from(vec![e.uri.as_deref()])),
+            Arc::new(StringArray::from(vec![e.uri_type.as_deref()])),
+            Arc::new(StringArray::from(vec![e.space.as_str()])),
+            Arc::new(Int64Array::from(vec![e.size_bytes as i64])),
+            Arc::new(StringArray::from(vec![e.mime_type.as_deref()])),
+            Arc::new(StringArray::from(vec![e.created_by.as_str()])),
+            Arc::new(Int64Array::from(vec![e.ref_count as i64])),
+            Arc::new(BooleanArray::from(vec![e.is_encrypted])),
+            Arc::new(BooleanArray::from(vec![e.synced_to_s3])),
+            Arc::new(Int64Array::from(vec![e.created_at])),
+            Arc::new(Int64Array::from(vec![e.updated_at])),
+        ],
+    )
+    .map_err(|err| PlatformError::Arrow(err.to_string()))
+}
+ 
+fn batch_to_entries(batch: RecordBatch) -> PlatformResult<Vec<CasEntry>> {
+    fn s<'a>(b: &'a RecordBatch, n: &str) -> PlatformResult<&'a StringArray> {
+        b.column_by_name(n)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| PlatformError::Arrow(format!("column {n} is not Utf8")))
+    }
+    fn i<'a>(b: &'a RecordBatch, n: &str) -> PlatformResult<&'a Int64Array> {
+        b.column_by_name(n)
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| PlatformError::Arrow(format!("column {n} is not Int64")))
+    }
+    fn bo<'a>(b: &'a RecordBatch, n: &str) -> PlatformResult<&'a BooleanArray> {
+        b.column_by_name(n)
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
+            .ok_or_else(|| PlatformError::Arrow(format!("column {n} is not Boolean")))
+    }
+ 
+    let hash     = s(&batch, "hash")?;
+    let did      = s(&batch, "did")?;
+    let uri      = s(&batch, "uri")?;
+    let uri_type = s(&batch, "uri_type")?;
+    let space    = s(&batch, "space")?;
+    let size     = i(&batch, "size_bytes")?;
+    let mime     = s(&batch, "mime_type")?;
+    let by       = s(&batch, "created_by")?;
+    let rc       = i(&batch, "ref_count")?;
+    let enc      = bo(&batch, "is_encrypted")?;
+    let synced   = bo(&batch, "synced_to_s3")?;
+    let ca       = i(&batch, "created_at")?;
+    let ua       = i(&batch, "updated_at")?;
+ 
+    let opt = |a: &StringArray, r: usize| {
+        if a.is_null(r) { None } else { Some(a.value(r).to_string()) }
+    };
+ 
+    Ok((0..batch.num_rows())
+        .map(|r| CasEntry {
+            hash:         hash.value(r).to_string(),
+            did:          did.value(r).to_string(),
+            uri:          opt(uri, r),
+            uri_type:     opt(uri_type, r),
+            space:        space.value(r).to_string(),
+            size_bytes:   size.value(r) as u64,
+            mime_type:    opt(mime, r),
+            created_by:   by.value(r).to_string(),
+            ref_count:    rc.value(r) as u32,
+            is_encrypted: enc.value(r),
+            synced_to_s3: synced.value(r),
+            created_at:   ca.value(r),
+            updated_at:   ua.value(r),
+        })
+        .collect())
+}
+ 
+// ─── HASHING / TIME ──────────────────────────────────────────────────────────
+ 
+pub fn hash_bytes(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
+}
+ 
+pub fn hash_str(s: &str) -> String {
+    hash_bytes(s.as_bytes())
+}
+ 
+fn now_micros() -> i64 {
+    chrono::Utc::now().timestamp_micros()
+}
+ 
+// ─── TESTS ───────────────────────────────────────────────────────────────────
+ 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+ 
+    fn cas() -> (PlatformCas, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let cas = PlatformCas::new(dir.path(), "did:web:alice.com");
+        (cas, dir)
+    }
+ 
+    #[tokio::test]
+    async fn test_put_get_round_trip() {
+        let (cas, _dir) = cas();
+        let (uri, is_new) = cas.put(b"hello platform", Some("text/plain"), "vault").await.unwrap();
+        assert!(uri.is_valid());
+        assert!(is_new);
+        assert_eq!(cas.get(&uri).await.unwrap(), b"hello platform");
+    }
+ 
+    #[tokio::test]
+    async fn test_upload_file_core_defaults_to_core_space() {
+        let (cas, _dir) = cas();
+        let (uri, cas_uri) = cas
+            .upload_file_core("resume.pdf", "application/pdf", b"%PDF-1.7 fake")
+            .await
+            .unwrap();
+ 
+        assert_eq!(uri.space.as_str(), "core");
+        assert!(cas_uri.is_valid());
+ 
+        let meta = cas.get_meta(&cas_uri).await.unwrap();
+        assert_eq!(meta.uri_type, Some("file".to_string()));
+        assert_eq!(meta.space, "core");
+        assert_eq!(meta.mime_type, Some("application/pdf".to_string()));
+        assert_eq!(meta.created_by, "files");
+        assert!(!meta.synced_to_s3);
+        assert_eq!(meta.ref_count, 1);
+    }
+ 
+    #[tokio::test]
+    async fn test_duplicate_upload_in_core_bumps_ref_count() {
+        let (cas, _dir) = cas();
+        let (_u1, c1) = cas.upload_file_core("a.pdf", "application/pdf", b"same bytes").await.unwrap();
+        let (_u2, c2) = cas.upload_file_core("b.pdf", "application/pdf", b"same bytes").await.unwrap();
+ 
+        assert_eq!(c1, c2); // identical content → identical hash → one blob
+        assert_eq!(cas.get_meta(&c1).await.unwrap().ref_count, 2);
+    }
+ 
+    #[tokio::test]
+    async fn test_get_meta_fields() {
+        let (cas, _dir) = cas();
+        let (uri, _) = cas.put(b"data!", Some("application/json"), "files").await.unwrap();
+        let meta = cas.get_meta(&uri).await.unwrap();
+        assert_eq!(meta.size_bytes, 5);
+        assert_eq!(meta.space, "core"); // put() with no owner defaults to core
+        assert!(meta.uri.is_none());
+    }
+ 
+    #[tokio::test]
+    async fn test_deref_to_zero_then_gc() {
+        let (cas, _dir) = cas();
+        let (_u, c) = cas.upload_file_core("x.txt", "text/plain", b"gc me").await.unwrap();
+        assert_eq!(cas.deref(&c).await.unwrap(), 0);
+        assert!(cas.exists(&c).await);
+ 
+        let report = cas.gc().await.unwrap();
+        assert_eq!(report.deleted_blobs, 1);
+        assert!(!cas.exists(&c).await);
+    }
+ 
+    #[test]
+    fn test_cas_uri_validation() {
+        assert!(CasUri::new(&"a".repeat(64)).is_valid());
+        assert!(!CasUri::new("short").is_valid());
+        assert!(!CasUri::new(&"z".repeat(64)).is_valid());
+    }
+ 
+    // Live Linode test — requires PRZMA_S3_* env + network.
+    // Run with:  cargo test -- --ignored replicate_to_linode --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn replicate_to_linode() {
+        let dir = tempdir().unwrap();
+        let store = linode_store_from_env().expect("PRZMA_S3_* env vars");
+        let cas = PlatformCas::with_s3(dir.path(), "did:web:test.przma.net", store);
+ 
+        cas.upload_file_core("note.txt", "text/plain", b"hello linode").await.unwrap();
+        let n = cas.replicate_unsynced().await.unwrap();
+        assert_eq!(n, 1);
+    }
+}
