@@ -65,12 +65,13 @@ defmodule PRZMAWeb.Router do
   #   ✅ Encryption support
 
   scope "/api/v1/files", PRZMAWeb do
-    pipe_through [:api, :require_did_auth]
+    pipe_through :api
 
     # Single-device sync (offline upload)
     post "/sync/blob",         FileSyncController, :upload_blob
     post "/sync/record",       FileSyncController, :sync_record
     get  "/sync/list",         FileSyncController, :list_remote
+    get  "/sync/cas-meta",     FileSyncController, :list_cas_meta
     get  "/sync/blob/:hash",   FileSyncController, :download_blob
 
     # Multi-device sync (pull missing files from server queue)

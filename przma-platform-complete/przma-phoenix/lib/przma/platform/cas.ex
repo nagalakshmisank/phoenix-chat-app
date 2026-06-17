@@ -13,7 +13,6 @@
 defmodule PRZMA.Platform.CAS do
   alias PRZMA.Calendar.NIF     # Reuses the existing NIF module
   alias PRZMA.Platform.ServicesCatalogue, as: SC
-  alias PRZMA.Platform.Namespace
 
   # Get base path from runtime config (defaults to local /tmp for dev)
   def base_path do
@@ -24,17 +23,32 @@ defmodule PRZMA.Platform.CAS do
 
   # ── WRITE ────────────────────────────────────────────────────────────────
 
-  @doc "Store bytes. Returns {:ok, cas_uri} where cas_uri = \"cas:{blake3_hex}\""
+  @doc """
+  Store bytes. Returns {:ok, cas_uri} where cas_uri = "cas:{blake3_hex}".
+
+  Options:
+    * `:hash` — the content hash to key the blob under (bare hex, no "cas:"
+      prefix). The desktop client computes BLAKE3 over the *plaintext* and
+      uploads the encrypted bytes; the server can't reproduce that hash (it
+      never sees the plaintext and lacks the key), so it stores under the
+      client-declared hash. When omitted (server-originated, non-E2E content),
+      the server hashes the bytes itself.
+    * `:written_by` — provenance tag.
+  """
   def put(did, data, opts \\ []) when is_binary(data) do
     written_by = opts[:written_by] || "unknown"
     # Encrypt via encryption context before writing
     case maybe_encrypt(did, data, written_by) do
-      {:ok, encrypted} ->
-        # Calculate BLAKE3 hash (temporary: use file-based storage until NIF ready)
-        hash = blake3_hash(encrypted)
+      {:ok, stored_bytes} ->
+        # Trust the client-declared content hash (E2E uploads); otherwise hash
+        # the bytes ourselves (server-originated content).
+        hash =
+          case opts[:hash] do
+            h when is_binary(h) and h != "" -> SC.cas_hash(h)
+            _ -> content_hash(stored_bytes)
+          end
 
-        # Store blob to filesystem temporarily (MVP: until Rust NIF is available)
-        case store_blob_file(did, hash, encrypted) do
+        case store_blob_file(did, hash, stored_bytes) do
           :ok ->
             {:ok, SC.cas_uri(hash)}
           {:error, msg} ->
@@ -90,7 +104,17 @@ defmodule PRZMA.Platform.CAS do
   @doc "Check if a CAS blob exists"
   def exists?(did, uri) do
     hash = SC.cas_hash(uri)
-    File.exists?(blob_path(did, hash))
+
+    case cas_backend() do
+      :s3 ->
+        case ExAws.S3.head_object(s3_bucket(), object_key(did, hash)) |> ExAws.request() do
+          {:ok, _} -> true
+          _ -> false
+        end
+
+      :local ->
+        File.exists?(blob_path(did, hash))
+    end
   end
 
   # ── LIFECYCLE ────────────────────────────────────────────────────────────
@@ -165,41 +189,111 @@ defmodule PRZMA.Platform.CAS do
     Path.join([base_path(), sanitized_did, "cas", shard, hash])
   end
 
+  # Object key for S3. Mirrors the local layout (minus base_path):
+  #   {sanitized_did}/cas/{shard}/{hash}
+  # e.g. did_web_alice.com/cas/72/724d57...
+  defp object_key(did, hash) do
+    shard = String.slice(hash, 0, 2)
+    sanitized_did = String.replace(did, ":", "_")
+    Enum.join([sanitized_did, "cas", shard, hash], "/")
+  end
+
+  defp cas_backend do
+    case Application.get_env(:przma, :cas_backend, "local") do
+      "s3" -> :s3
+      :s3 -> :s3
+      _ -> :local
+    end
+  end
+
+  defp s3_bucket do
+    Application.get_env(:przma, :s3_bucket) ||
+      System.get_env("S3_BUCKET") ||
+      System.get_env("BUCKET") ||
+      "przma-vaults"
+  end
+
   # ── TEMPORARY FILE-BASED STORAGE (until Rust NIF is ready) ──────────────────
 
-  defp blake3_hash(data) do
-    # Simple hash for MVP: SHA256 (replace with BLAKE3 when NIF ready)
+  # Fallback hash for server-originated content (no client hash supplied).
+  # NOTE: this is SHA-256, NOT BLAKE3. It is only ever used for content the
+  # server itself creates and reads back (internally consistent). Client blobs
+  # are always keyed by the client's BLAKE3 hash passed via opts[:hash].
+  defp content_hash(data) do
     :crypto.hash(:sha256, data)
     |> Base.encode16(case: :lower)
   end
 
   defp store_blob_file(did, hash, data) do
-    base = base_path()
-
-    # If using S3 path, skip file operations (NIF handles S3 directly)
-    if String.starts_with?(base, "s3://") do
-      # TODO: Implement S3 storage via NIF when ready
-      {:error, "S3 storage not yet implemented; set VAULT_BASE_PATH to local directory"}
-    else
-      # Local file storage
-      File.mkdir_p!(base)
-      path = blob_path(did, hash)
-      dir = Path.dirname(path)
-
-      case File.mkdir_p(dir) do
-        :ok ->
-          case File.write(path, data) do
-            :ok -> :ok
-            {:error, reason} -> {:error, "failed to write blob: #{reason}"}
-          end
-
-        {:error, reason} ->
-          {:error, "failed to create directory: #{reason}"}
-      end
+    case cas_backend() do
+      :s3    -> store_blob_s3(did, hash, data)
+      :local -> store_blob_local(did, hash, data)
     end
   end
 
   defp retrieve_blob_file(did, hash) do
+    case cas_backend() do
+      :s3    -> retrieve_blob_s3(did, hash)
+      :local -> retrieve_blob_local(did, hash)
+    end
+  end
+
+  # ── S3 / OBJECT STORE BACKEND ───────────────────────────────────────────────
+
+  defp store_blob_s3(did, hash, data) do
+    bucket = s3_bucket()
+    key = object_key(did, hash)
+
+    # CAS is immutable & deduplicated: if the object already exists, the bytes
+    # are identical, so skip the upload.
+    if blob_exists_s3?(bucket, key) do
+      :ok
+    else
+      case ExAws.S3.put_object(bucket, key, data) |> ExAws.request() do
+        {:ok, _resp} -> :ok
+        {:error, reason} -> {:error, "S3 put failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp retrieve_blob_s3(did, hash) do
+    bucket = s3_bucket()
+    key = object_key(did, hash)
+
+    case ExAws.S3.get_object(bucket, key) |> ExAws.request() do
+      {:ok, %{body: body}}            -> {:ok, body}
+      {:error, {:http_error, 404, _}} -> {:error, :not_found}
+      {:error, reason}                -> {:error, "S3 get failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp blob_exists_s3?(bucket, key) do
+    case ExAws.S3.head_object(bucket, key) |> ExAws.request() do
+      {:ok, _} -> true
+      _ -> false
+    end
+  end
+
+  # ── LOCAL FILESYSTEM BACKEND ────────────────────────────────────────────────
+
+  defp store_blob_local(did, hash, data) do
+    File.mkdir_p!(base_path())
+    path = blob_path(did, hash)
+    dir = Path.dirname(path)
+
+    case File.mkdir_p(dir) do
+      :ok ->
+        case File.write(path, data) do
+          :ok -> :ok
+          {:error, reason} -> {:error, "failed to write blob: #{reason}"}
+        end
+
+      {:error, reason} ->
+        {:error, "failed to create directory: #{reason}"}
+    end
+  end
+
+  defp retrieve_blob_local(did, hash) do
     path = blob_path(did, hash)
 
     case File.read(path) do
@@ -208,66 +302,4 @@ defmodule PRZMA.Platform.CAS do
       {:error, reason} -> {:error, "failed to read blob: #{reason}"}
     end
   end
-  @doc "Store a blob keyed by the client-provided BLAKE3 hash."
-  def put_blob(did, hash, data) when is_binary(hash) and is_binary(data) do
-    base = base_path()
-    shard = String.slice(hash, 0, 2)
-
-    if s3?(base) do
-      {bucket, prefix} = parse_s3(base)
-      key = join_key([prefix, Namespace.sanitize_did(did), "cas", shard, hash])
-      case ExAws.S3.put_object(bucket, key, data) |> ExAws.request() do
-        {:ok, _} -> {:ok, "cas:#{hash}"}
-        {:error, reason} -> {:error, "s3 put failed: #{inspect(reason)}"}
-      end
-    else
-      path = Path.join([base, Namespace.sanitize_did(did), "cas", shard, hash])
-      with :ok <- File.mkdir_p(Path.dirname(path)),
-           :ok <- File.write(path, data) do
-        bucket = System.get_env("PRZMA_S3_BUCKET", "perkeep")
-        key = join_key([Namespace.sanitize_did(did), "cas", shard, hash])
-        case ExAws.S3.put_object(bucket, key, data) |> ExAws.request() do
-          {:ok, _} ->
-            {:ok, "cas:#{hash}"}
-          {:error, reason} ->
-            require Logger
-            Logger.warning("S3 sync failed for #{hash}: #{inspect(reason)}")
-            {:ok, "cas:#{hash}"}
-        end
-      else
-        {:error, reason} -> {:error, "blob write failed: #{inspect(reason)}"}
-      end
-    end
-  end
-
-  @doc "Read a blob by BLAKE3 hash from S3 or local disk."
-  def get_blob(did, hash) when is_binary(hash) do
-    base = base_path()
-    shard = String.slice(hash, 0, 2)
-
-    if s3?(base) do
-      {bucket, prefix} = parse_s3(base)
-      key = join_key([prefix, Namespace.sanitize_did(did), "cas", shard, hash])
-      case ExAws.S3.get_object(bucket, key) |> ExAws.request() do
-        {:ok, %{body: body}} -> {:ok, body}
-        {:error, _} -> {:error, :not_found}
-      end
-    else
-      path = Path.join([base, Namespace.sanitize_did(did), "cas", shard, hash])
-      case File.read(path) do
-        {:ok, data} -> {:ok, data}
-        {:error, :enoent} -> {:error, :not_found}
-        {:error, reason} -> {:error, "blob read failed: #{inspect(reason)}"}
-      end
-    end
-  end
-
-  defp s3?(p), do: String.starts_with?(p, "s3://")
-  defp parse_s3("s3://" <> rest) do
-    case String.split(rest, "/", parts: 2) do
-      [bucket, prefix] -> {bucket, prefix}
-      [bucket] -> {bucket, ""}
-    end
-  end
-  defp join_key(parts), do: parts |> Enum.reject(&(&1 == "")) |> Enum.join("/")
 end

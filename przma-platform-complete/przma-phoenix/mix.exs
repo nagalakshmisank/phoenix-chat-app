@@ -46,6 +46,10 @@ defmodule PRZMA.MixProject do
       # Object storage (S3)
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
+      # ExAws needs an HTTP client (hackney) and an XML parser (sweet_xml)
+      # for S3 request signing/response parsing.
+      {:hackney, "~> 1.20"},
+      {:sweet_xml, "~> 0.7"},
 
       # Job queue
       {:oban, "~> 2.14"},
@@ -69,3 +73,4 @@ defmodule PRZMA.MixProject do
     ]
   end
 end
+
