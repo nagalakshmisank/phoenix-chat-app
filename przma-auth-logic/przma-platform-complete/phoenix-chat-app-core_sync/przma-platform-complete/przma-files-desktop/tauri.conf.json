@@ -1,0 +1,27 @@
+{
+  "productName": "PRZMA",
+  "version": "0.1.0",
+  "identifier": "com.przma.files",
+  "build": {
+    "frontendDist": "dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PRZMA",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' https:; img-src 'self' blob: https:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https://fonts.gstatic.com;"
+    },
+    "withGlobalTauri": true
+  }
+}

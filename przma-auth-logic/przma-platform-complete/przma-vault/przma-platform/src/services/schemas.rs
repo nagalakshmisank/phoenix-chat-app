@@ -1,0 +1,500 @@
+// przma-platform/src/services/schemas.rs
+//
+// Lance schema definitions for all PRZMA platform services.
+// Each service has its own set of tables under:
+//   {base_path}/{did}/{service}/{space}/{table}.lance
+//
+// Conventions across all schemas:
+//   - id:         BLAKE3 hex or UUIDv4 string
+//   - did:        owner's DID string
+//   - space:      "core" | "circle:{did}" | "commons"
+//   - embedding:  FixedSizeList<Float32>(768) — semantic search
+//   - created_at/updated_at: Int64 microseconds UTC
+//   - *_cas:      Utf8 — CAS URI (cas:{blake3_hex})
+//   - *_json:     Utf8 — JSON-encoded complex types
+
+use arrow_schema::{DataType, Field, Fields, Schema};
+use std::sync::Arc;
+
+const EMBEDDING_DIM: i32 = 768;
+
+fn embedding_field() -> Field {
+    Field::new(
+        "embedding",
+        DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            EMBEDDING_DIM,
+        ),
+        false,
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. VAULT SERVICE
+//    The sovereign personal journal.
+//    8 vault domains map to PRZMA's 7 Filter / 2 Lens framework:
+//      My Health     → Body Filter
+//      My Day        → Senses + Mind Filters
+//      My People     → Heart Filter (Gateway)
+//      My Thoughts   → Mind + Ego Filters
+//      Who I Am      → Knowledge + Detachment Filters
+//      What I Learned → Knowledge Filter
+//      Quiet Moments → Detachment Filter + Purpose Lens
+//      My Practices  → All Filters — the integration domain
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod vault {
+    use super::*;
+
+    /// Vault domain — corresponds to the 8 onboarding domains
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub enum VaultDomain {
+        MyHealth,
+        MyDay,
+        MyPeople,
+        MyThoughts,
+        WhoIAm,
+        WhatILearned,
+        QuietMoments,
+        MyPractices,
+    }
+
+    impl VaultDomain {
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Self::MyHealth      => "my_health",
+                Self::MyDay         => "my_day",
+                Self::MyPeople      => "my_people",
+                Self::MyThoughts    => "my_thoughts",
+                Self::WhoIAm        => "who_i_am",
+                Self::WhatILearned  => "what_i_learned",
+                Self::QuietMoments  => "quiet_moments",
+                Self::MyPractices   => "my_practices",
+            }
+        }
+
+        /// Map a calendar category to the most appropriate vault domain
+        pub fn from_calendar_category(category: &str) -> Self {
+            match category {
+                "MEETING"     => Self::MyPeople,
+                "PRACTICE"    => Self::MyPractices,
+                "STUDY"       => Self::WhatILearned,
+                "APPOINTMENT" => Self::MyHealth,
+                "ACTIVITY"    => Self::MyDay,
+                _             => Self::MyDay,
+            }
+        }
+    }
+
+    /// Main vault entry schema — one record per journal entry or reflection
+    pub fn entry_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),
+            Field::new("space",           DataType::Utf8, false),
+            Field::new("domain",          DataType::Utf8, false),   // VaultDomain as_str
+            Field::new("entry_type",      DataType::Utf8, false),   // reflection|note|insight|moment|practice_log
+            Field::new("title",           DataType::Utf8, false),
+            Field::new("body_cas",        DataType::Utf8, false),   // CAS URI — plaintext body
+            Field::new("richtext_cas",    DataType::Utf8, true),    // CAS URI — rendered/formatted version
+            Field::new("source_uri",      DataType::Utf8, true),    // przma:// URI of originating resource
+            Field::new("source_type",     DataType::Utf8, true),    // "calendar_event" | "chat_message" | "manual"
+            Field::new("filter_context",  DataType::Utf8, false),   // JSON: which filters were active
+            Field::new("lens_context",    DataType::Utf8, false),   // JSON: purpose/resilience lens state
+            Field::new("tags_json",       DataType::Utf8, false),
+            Field::new("attachments_json",DataType::Utf8, false),   // [CAS URIs]
+            embedding_field(),
+            Field::new("mood_score",      DataType::Float32, true), // -1.0 to 1.0
+            Field::new("energy_score",    DataType::Float32, true), // 0.0 to 1.0
+            Field::new("is_private",      DataType::Boolean, false),
+            Field::new("is_pinned",       DataType::Boolean, false),
+            Field::new("created_at",      DataType::Int64, false),
+            Field::new("updated_at",      DataType::Int64, false),
+            Field::new("version",         DataType::Int32, false),
+        ])))
+    }
+
+    /// Vault practice log — links practices to completion events
+    pub fn practice_log_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",           DataType::Utf8, false),
+            Field::new("did",          DataType::Utf8, false),
+            Field::new("practice_name",DataType::Utf8, false),
+            Field::new("filter",       DataType::Utf8, false),    // which filter this practice addresses
+            Field::new("event_id",     DataType::Utf8, true),     // linked calendar event
+            Field::new("entry_id",     DataType::Utf8, true),     // linked vault entry
+            Field::new("completed_at", DataType::Int64, false),
+            Field::new("duration_mins",DataType::Int32, false),
+            Field::new("quality_score",DataType::Float32, true),  // self-rated 0.0-1.0
+            Field::new("notes_cas",    DataType::Utf8, true),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. CHAT SERVICE
+//    Messaging across Core (DMs), Circle (group), and Commons (public threads).
+//    Community tier: Gun.js P2P with BLAKE3 content verification.
+//    Commons tier: ActivityPub-federated threads.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod chat {
+    use super::*;
+
+    pub fn message_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),   // sender DID
+            Field::new("space",           DataType::Utf8, false),
+            Field::new("thread_id",       DataType::Utf8, false),
+            Field::new("reply_to_id",     DataType::Utf8, true),
+            Field::new("body_cas",        DataType::Utf8, false),   // CAS URI — message text
+            Field::new("body_mime",       DataType::Utf8, false),   // "text/plain" | "text/markdown"
+            Field::new("attachments_json",DataType::Utf8, false),   // [CAS URIs]
+            Field::new("reactions_json",  DataType::Utf8, false),   // {"emoji": [dids]}
+            Field::new("mentions_json",   DataType::Utf8, false),   // [DIDs mentioned]
+            Field::new("edited_at",       DataType::Int64, true),
+            Field::new("deleted_at",      DataType::Int64, true),
+            Field::new("ap_id",           DataType::Utf8, true),    // ActivityPub object ID
+            Field::new("gun_hash",        DataType::Utf8, true),    // Gun.js content hash
+            embedding_field(),
+            Field::new("created_at",      DataType::Int64, false),
+        ])))
+    }
+
+    pub fn thread_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),   // creator
+            Field::new("space",           DataType::Utf8, false),
+            Field::new("title",           DataType::Utf8, false),
+            Field::new("thread_type",     DataType::Utf8, false),   // dm|group|channel|companion
+            Field::new("participants_json",DataType::Utf8, false),
+            Field::new("last_message_at", DataType::Int64, true),
+            Field::new("message_count",   DataType::Int32, false),
+            Field::new("is_archived",     DataType::Boolean, false),
+            Field::new("ap_context_id",   DataType::Utf8, true),
+            Field::new("created_at",      DataType::Int64, false),
+            Field::new("updated_at",      DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. FILES SERVICE
+//    Versioned file management.
+//    Files are stored as CAS blobs; the files table tracks metadata and versions.
+//    Chunked parallel upload for large files (PRZMA Studio).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod files {
+    use super::*;
+
+    pub fn file_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),
+            Field::new("space",           DataType::Utf8, false),
+            Field::new("name",            DataType::Utf8, false),
+            Field::new("path",            DataType::Utf8, false),   // virtual path, e.g. /documents/report.pdf
+            Field::new("mime_type",       DataType::Utf8, false),
+            Field::new("size_bytes",      DataType::Int64, false),
+            Field::new("content_cas",     DataType::Utf8, false),   // CAS URI — current version content
+            Field::new("thumbnail_cas",   DataType::Utf8, true),    // CAS URI — preview image
+            Field::new("versions_json",   DataType::Utf8, false),   // [{version, cas, changed_at, size}]
+            Field::new("current_version", DataType::Int32, false),
+            Field::new("tags_json",       DataType::Utf8, false),
+            Field::new("source_uri",      DataType::Utf8, true),    // przma:// — where this file originated
+            embedding_field(),                                       // for semantic file search
+            Field::new("is_public",       DataType::Boolean, false),
+            Field::new("is_encrypted",    DataType::Boolean, false),
+            Field::new("upload_status",   DataType::Utf8, false),   // pending|chunking|complete|failed
+            Field::new("chunk_count",     DataType::Int32, true),   // for parallel upload tracking
+            Field::new("chunks_received", DataType::Int32, true),
+            Field::new("created_at",      DataType::Int64, false),
+            Field::new("updated_at",      DataType::Int64, false),
+        ])))
+    }
+
+    pub fn upload_session_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("session_id",     DataType::Utf8, false),
+            Field::new("did",            DataType::Utf8, false),
+            Field::new("file_name",      DataType::Utf8, false),
+            Field::new("mime_type",      DataType::Utf8, false),
+            Field::new("total_bytes",    DataType::Int64, false),
+            Field::new("chunk_size",     DataType::Int32, false),
+            Field::new("total_chunks",   DataType::Int32, false),
+            Field::new("received_chunks_json", DataType::Utf8, false), // [chunk_indices received]
+            Field::new("chunk_hashes_json",    DataType::Utf8, false), // [CAS URI per chunk]
+            Field::new("status",         DataType::Utf8, false),    // active|assembling|complete|expired
+            Field::new("expires_at",     DataType::Int64, false),
+            Field::new("created_at",     DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. METADATA SERVICE
+//    Cross-service index, tag management, and reference graph.
+//    The only service that reads across all other services' Lance tables.
+//    Used by companion for full-vault context assembly.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod metadata {
+    use super::*;
+
+    /// Cross-service reference — how one resource links to another
+    pub fn reference_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",           DataType::Utf8, false),
+            Field::new("did",          DataType::Utf8, false),
+            Field::new("source_uri",   DataType::Utf8, false),   // przma:// URI of the source resource
+            Field::new("target_uri",   DataType::Utf8, false),   // przma:// URI of the referenced resource
+            Field::new("rel_type",     DataType::Utf8, false),   // "linked"|"derived_from"|"tagged"|"cited"
+            Field::new("created_at",   DataType::Int64, false),
+            Field::new("created_by",   DataType::Utf8, false),   // service that created this link
+        ])))
+    }
+
+    /// User-defined tags applied to any resource
+    pub fn tag_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",           DataType::Utf8, false),
+            Field::new("did",          DataType::Utf8, false),
+            Field::new("tag",          DataType::Utf8, false),
+            Field::new("color",        DataType::Utf8, true),    // hex color string
+            Field::new("resource_uris_json", DataType::Utf8, false), // [przma:// URIs]
+            Field::new("created_at",   DataType::Int64, false),
+        ])))
+    }
+
+    /// Global search index — lightweight snippet per resource for cross-service search
+    pub fn search_index_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("uri",          DataType::Utf8, false),   // przma:// URI (primary key)
+            Field::new("did",          DataType::Utf8, false),
+            Field::new("service",      DataType::Utf8, false),
+            Field::new("title",        DataType::Utf8, false),
+            Field::new("snippet",      DataType::Utf8, false),   // ≤200 char preview
+            Field::new("tags_json",    DataType::Utf8, false),
+            embedding_field(),
+            Field::new("indexed_at",   DataType::Int64, false),
+            Field::new("created_at",   DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. AI SERVICE
+//    Model registry, inference call tracking, and adapter management.
+//    Tracks which models are loaded locally vs served remotely.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod ai {
+    use super::*;
+
+    pub fn model_registry_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",            DataType::Utf8, false),
+            Field::new("did",           DataType::Utf8, false),
+            Field::new("model_name",    DataType::Utf8, false),   // "przma_embedder_v1", "przma_chat_v2"
+            Field::new("model_type",    DataType::Utf8, false),   // embedding|classification|generation|asr
+            Field::new("framework",     DataType::Utf8, false),   // tflite|onnx|axon
+            Field::new("model_cas",     DataType::Utf8, false),   // CAS URI — the .tflite/.onnx file
+            Field::new("adapter_cas",   DataType::Utf8, true),    // CAS URI — personal LoRA adapter
+            Field::new("adapter_version", DataType::Int32, false),
+            Field::new("input_shape_json", DataType::Utf8, false),
+            Field::new("output_shape_json",DataType::Utf8, false),
+            Field::new("is_active",     DataType::Boolean, false),
+            Field::new("size_bytes",    DataType::Int64, false),
+            Field::new("loaded_at",     DataType::Int64, true),
+            Field::new("last_used_at",  DataType::Int64, true),
+            Field::new("created_at",    DataType::Int64, false),
+        ])))
+    }
+
+    pub fn inference_log_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",             DataType::Utf8, false),
+            Field::new("did",            DataType::Utf8, false),
+            Field::new("model_id",       DataType::Utf8, false),
+            Field::new("call_type",      DataType::Utf8, false),  // embed|classify|generate|transcribe
+            Field::new("input_tokens",   DataType::Int32, true),
+            Field::new("output_tokens",  DataType::Int32, true),
+            Field::new("latency_ms",     DataType::Int32, false),
+            Field::new("source_uri",     DataType::Utf8, true),   // which resource triggered this
+            Field::new("on_device",      DataType::Boolean, false),
+            Field::new("called_at",      DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. AGENTS SERVICE
+//    Agent session management, tool grants, and execution logs.
+//    Implements the OpenClaw-inspired OTP agent architecture from memory.
+//    Agents: AgentGateway → AgentSession → AgentLoop → DNA PromptBuilder
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod agents {
+    use super::*;
+
+    pub fn agent_session_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),
+            Field::new("agent_type",      DataType::Utf8, false),  // companion|scribe|scheduler|scanner|...
+            Field::new("agent_version",   DataType::Utf8, false),
+            Field::new("space",           DataType::Utf8, false),
+            Field::new("circle_did",      DataType::Utf8, true),
+            Field::new("status",          DataType::Utf8, false),  // active|paused|completed|failed
+            Field::new("tool_grants_json",DataType::Utf8, false),  // [{tool, scope, expires_at}]
+            Field::new("context_uri",     DataType::Utf8, true),   // przma:// — the resource being worked on
+            Field::new("dna_prompt_cas",  DataType::Utf8, true),   // CAS URI — the compiled DNA prompt
+            Field::new("heartbeat_at",    DataType::Int64, true),  // last Oban heartbeat
+            Field::new("started_at",      DataType::Int64, false),
+            Field::new("ended_at",        DataType::Int64, true),
+            Field::new("output_uris_json",DataType::Utf8, false),  // [przma:// URIs produced]
+        ])))
+    }
+
+    pub fn agent_execution_log_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",             DataType::Utf8, false),
+            Field::new("session_id",     DataType::Utf8, false),
+            Field::new("did",            DataType::Utf8, false),
+            Field::new("step",           DataType::Int32, false),
+            Field::new("tool",           DataType::Utf8, false),
+            Field::new("input_cas",      DataType::Utf8, true),
+            Field::new("output_cas",     DataType::Utf8, true),
+            Field::new("status",         DataType::Utf8, false),  // ok|error|skipped
+            Field::new("error_message",  DataType::Utf8, true),
+            Field::new("latency_ms",     DataType::Int32, false),
+            Field::new("executed_at",    DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. CREATIVE SERVICE (PRZMA Studio)
+//    Sovereign creative workspace — the "PRZMA Studio" platform.
+//    Projects, assets, timelines, and published works.
+//    Not a SaaS dashboard — it's the user's creative vault.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod creative {
+    use super::*;
+
+    pub fn project_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",               DataType::Utf8, false),
+            Field::new("did",              DataType::Utf8, false),
+            Field::new("space",            DataType::Utf8, false),
+            Field::new("title",            DataType::Utf8, false),
+            Field::new("description",      DataType::Utf8, false),
+            Field::new("project_type",     DataType::Utf8, false),   // writing|audio|visual|video|mixed
+            Field::new("status",           DataType::Utf8, false),   // draft|in_progress|review|published
+            Field::new("assets_json",      DataType::Utf8, false),   // [CAS URIs]
+            Field::new("timeline_cas",     DataType::Utf8, true),    // JSON timeline / edit sequence
+            Field::new("published_uri",    DataType::Utf8, true),    // ActivityPub object ID if published
+            Field::new("collaborators_json", DataType::Utf8, false), // [DIDs]
+            embedding_field(),
+            Field::new("tags_json",        DataType::Utf8, false),
+            Field::new("created_at",       DataType::Int64, false),
+            Field::new("updated_at",       DataType::Int64, false),
+            Field::new("published_at",     DataType::Int64, true),
+            Field::new("version",          DataType::Int32, false),
+        ])))
+    }
+
+    pub fn asset_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",           DataType::Utf8, false),
+            Field::new("did",          DataType::Utf8, false),
+            Field::new("project_id",   DataType::Utf8, false),
+            Field::new("asset_type",   DataType::Utf8, false),  // text|image|audio|video|document
+            Field::new("name",         DataType::Utf8, false),
+            Field::new("content_cas",  DataType::Utf8, false),  // CAS URI
+            Field::new("mime_type",    DataType::Utf8, false),
+            Field::new("size_bytes",   DataType::Int64, false),
+            Field::new("duration_secs",DataType::Float32, true),  // for audio/video
+            Field::new("width",        DataType::Int32, true),   // for images/video
+            Field::new("height",       DataType::Int32, true),
+            Field::new("metadata_json",DataType::Utf8, false),   // EXIF, ID3, etc.
+            Field::new("created_at",   DataType::Int64, false),
+        ])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. COMPANION SERVICE (Arc Engine)
+//    The personal perception intelligence layer.
+//    Reads from ALL other services via the metadata index.
+//    Stores: memories, perception state, Sapience Index, HOLNN state.
+//    Filter states: CLEAR/FOGGED (never open/close).
+//    Sapience Index: S = 40Λ + 30(1-Γ) + 15Φ₄ + 15P
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub mod companion {
+    use super::*;
+
+    pub fn memory_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",              DataType::Utf8, false),
+            Field::new("did",             DataType::Utf8, false),
+            Field::new("memory_type",     DataType::Utf8, false),   // episodic|semantic|procedural|emotional
+            Field::new("title",           DataType::Utf8, false),
+            Field::new("body_cas",        DataType::Utf8, false),   // CAS URI — memory text
+            Field::new("source_uri",      DataType::Utf8, true),    // przma:// — originating resource
+            Field::new("source_service",  DataType::Utf8, true),    // which service produced this memory
+            Field::new("filter_state_json",DataType::Utf8, false),  // {body: CLEAR|FOGGED, senses: ..., mind: ..., heart: ..., ego: ..., knowledge: ..., detachment: ...}
+            Field::new("valence",         DataType::Float32, true), // emotional valence -1.0 to 1.0
+            Field::new("salience",        DataType::Float32, false),// 0.0–1.0 — how significant
+            Field::new("expiry_at",       DataType::Int64, true),   // 3-session expiry for insights
+            embedding_field(),
+            Field::new("recalled_count",  DataType::Int32, false),  // how many times surfaced to user
+            Field::new("last_recalled_at",DataType::Int64, true),
+            Field::new("created_at",      DataType::Int64, false),
+            Field::new("updated_at",      DataType::Int64, false),
+        ])))
+    }
+
+    /// Sapience Index snapshot — longitudinal perception intelligence state
+    pub fn sapience_snapshot_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",             DataType::Utf8, false),
+            Field::new("did",            DataType::Utf8, false),
+            // Sapience Index: S = 40Λ + 30(1-Γ) + 15Φ₄ + 15P
+            Field::new("lambda",         DataType::Float32, false), // Λ — coherence (HeartMath)
+            Field::new("gamma",          DataType::Float32, false), // Γ — distortion index
+            Field::new("phi4",           DataType::Float32, false), // Φ₄ — Heart Filter clarity
+            Field::new("practice_score", DataType::Float32, false), // P — practice adherence
+            Field::new("sapience_index", DataType::Float32, false), // S — final computed score
+            // Filter states (CLEAR/FOGGED per filter)
+            Field::new("filter_states_json", DataType::Utf8, false),
+            // HOLNN matrix — 49 entries (7×7), input tensor 446 dimensions
+            Field::new("holnn_matrix_json",  DataType::Utf8, true),
+            Field::new("pb_accumulator",     DataType::Float32, false), // Pb value (+0.008/+0.012/+0.005, 2% weekly decay)
+            Field::new("cri_modulation",     DataType::Float32, false), // CRI from SAS Bronfenbrenner C1
+            Field::new("sas_score",          DataType::Float32, false), // System of Activation Score
+            Field::new("snapshot_at",        DataType::Int64, false),
+            Field::new("period_days",        DataType::Int32, false),
+        ])))
+    }
+
+    /// Arc Engine longitudinal timeline — events surfaced to awareness
+    pub fn arc_timeline_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(Fields::from(vec![
+            Field::new("id",          DataType::Utf8, false),
+            Field::new("did",         DataType::Utf8, false),
+            Field::new("resource_uri",DataType::Utf8, false),   // przma:// URI of surfaced resource
+            Field::new("surface_type",DataType::Utf8, false),   // proactive|recalled|requested
+            Field::new("reason",      DataType::Utf8, false),   // why it was surfaced
+            Field::new("filter",      DataType::Utf8, false),   // which filter domain this belongs to
+            Field::new("relevance",   DataType::Float32, false),
+            Field::new("surfaced_at", DataType::Int64, false),
+            Field::new("acted_on",    DataType::Boolean, false),
+        ])))
+    }
+}

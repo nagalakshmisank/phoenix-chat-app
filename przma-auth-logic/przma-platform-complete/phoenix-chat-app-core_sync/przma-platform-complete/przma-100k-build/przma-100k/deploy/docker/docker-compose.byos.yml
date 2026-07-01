@@ -1,0 +1,35 @@
+# deploy/docker/docker-compose.byos.yml
+#
+# PRZMA with BYOS (Bring Your Own Storage).
+# Use this when you want to host Phoenix yourself but store vault data
+# in Linode Object Storage, DigitalOcean Spaces, Cloudflare R2, etc.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.byos.yml up -d
+
+version: '3.8'
+
+services:
+  przma:
+    environment:
+      # Override to use external S3-compatible storage
+      PRZMA_MODE: byos
+
+      # === Your S3-compatible provider ===
+      # Linode Object Storage:
+      PRZMA_S3_ENDPOINT:    ${BYOS_S3_ENDPOINT}   # e.g. https://us-east-1.linodeobjects.com
+      PRZMA_S3_BUCKET:      ${BYOS_S3_BUCKET}
+      PRZMA_S3_REGION:      ${BYOS_S3_REGION:-us-east-1}
+      PRZMA_S3_ACCESS_KEY:  ${BYOS_S3_ACCESS_KEY}
+      PRZMA_S3_SECRET:      ${BYOS_S3_SECRET}
+
+    # Don't need local MinIO volume for BYOS
+    volumes:
+      - vault_index:/data/vaults  # Local index only — blobs go to S3
+
+volumes:
+  vault_index:
+    driver: local
+
+# Remove MinIO services in BYOS mode
+# (they are overridden to no-op if defined in base file)

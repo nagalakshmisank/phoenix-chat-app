@@ -1,0 +1,30 @@
+# Rust build artifacts
+**/target/
+**/*.pdb
+
+# Elixir/Phoenix build artifacts
+**/_build/
+**/deps/
+**/*.beam
+
+# Node modules
+**/node_modules/
+**/dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Erlang crash dumps
+erl_crash.dump

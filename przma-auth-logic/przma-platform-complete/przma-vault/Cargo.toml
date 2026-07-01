@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "przma-calendar",
+    "przma-nif",
+]
+
+[workspace.dependencies]
+# Arrow / LanceDB
+lancedb          = "0.9"
+arrow            = { version = "53", features = ["prettyprint"] }
+arrow-schema     = "53"
+arrow-array      = "53"
+arrow-buffer     = "53"
+arrow-cast       = "53"
+
+# Storage / Hashing
+blake3           = "1"
+duckdb           = { version = "1", features = ["bundled"] }
+
+# Time / Recurrence
+chrono           = { version = "0.4", features = ["serde"] }
+rrule            = "0.13"
+
+# Serde / Async
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+tokio            = { version = "1", features = ["full"] }
+futures          = "0.3"
+
+# Utilities
+uuid             = { version = "1", features = ["v4"] }
+thiserror        = "1"
+anyhow           = "1"
+tracing          = "0.1"
+
+# NIF
+rustler          = "0.33"

@@ -1,0 +1,17 @@
+[package]
+name    = "przma-nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name   = "przma_nif"
+crate-type = ["cdylib"]
+
+[dependencies]
+przma-calendar = { path = "../przma-calendar" }
+przma-platform = { path = "../przma-platform" }
+rustler         = { workspace = true }
+tokio           = { workspace = true }
+serde_json      = { workspace = true }
+chrono          = { workspace = true }
+tracing         = { workspace = true }
