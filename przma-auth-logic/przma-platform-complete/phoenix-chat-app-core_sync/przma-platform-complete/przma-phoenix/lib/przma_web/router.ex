@@ -90,7 +90,7 @@ defmodule PRZMAWeb.Router do
   #   ✅ Encryption support
 
   scope "/api/v1/files", PRZMAWeb do
-    pipe_through :api_binary
+    pipe_through [:api_binary, :require_did_auth]
 
     # Single-device sync (offline upload)
     post "/sync/blob",         FileSyncController, :upload_blob

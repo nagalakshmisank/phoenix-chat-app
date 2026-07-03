@@ -1,9 +1,10 @@
-	defmodule PRZMAWeb.ApiSpec do
+defmodule PRZMAWeb.ApiSpec do
   @moduledoc """
   OpenAPI/Swagger specification for the PRZMA Platform API.
 
-  Scope: ONLY the routes that are actually live in lib/przma_web/router.ex —
-  /api/v1/files/* and /api/v1/social/*.
+  Scope: routes live in lib/przma_web/router.ex —
+  /api/v1/account/*, /api/v1/oauth/*, /api/v1/sessions*,
+  /api/v1/accounts/verify_credentials, /api/v1/files/*, /api/v1/social/*.
 
   Calendar (/api/v1/calendar/*) is intentionally NOT included here: it is
   commented out in router.ex ("Calendar service disabled — has compilation
@@ -19,25 +20,145 @@
   def spec do
     %OpenApi{
       info: %Info{
-        title: "PRZMA Platform API — Files & Social",
+        title: "PRZMA Platform API — Files, Social & Auth",
         version: "1.0.0",
         description: """
-        Live endpoints only: /api/v1/files/* and /api/v1/social/*.
+        Live endpoints: /api/v1/account/*, /api/v1/oauth/*, /api/v1/sessions,
+        /api/v1/accounts/verify_credentials, /api/v1/files/*, and /api/v1/social/*.
 
         ## Auth
-        - `/api/v1/files/*` — NO auth pipeline applied (`:api` only). The
-          controller reads `did` / `blake3_hash` from headers
-          (`x-przma-did`, `x-przma-blake3`) or from the JSON body.
-        - `/api/v1/social/*` — requires `:require_did_auth`
-          (`PRZMAWeb.Plugs.DIDAuth`). This is a TEST STUB plug: it accepts
-          ANY `Authorization: Bearer demo-<value>` token and sets
-          `conn.assigns[:did]` to `<value>` — no signature check happens.
+        - `/api/v1/account/*` and `POST /api/v1/oauth/token` — public, no auth
+          required (registration/login themselves).
+        - `/api/v1/social/*`, `/api/v1/files/*`, `DELETE /api/v1/oauth/token`,
+          `/api/v1/sessions*`, `/api/v1/accounts/verify_credentials` — require
+          `:require_did_auth` (`PRZMAWeb.Plugs.DIDAuth`). Real signed-token
+          verification (`Phoenix.Token`), not a stub — the DID is embedded in
+          the token itself, so verifying it never touches the database.
         """
+        # ← AUTH: paragraph updated — Files now requires :require_did_auth,
+        #   same as Social, matching the router.ex change.
       },
       servers: [
         %Server{url: "http://172.235.18.126:4201", description: "Development"}
       ],
       paths: %{
+        # ── AUTH ─────────────────────────────────────────────────────────
+        "/api/v1/account/register" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Register Account", "register",
+            "Create a new account. DID is computed as did:przma:<nickname>. " <>
+            "Sends a 6-digit OTP to the given email for verification.",
+            "RegisterRequest",
+            %{200 => resp("Registered — check email for OTP", "RegisterResponse"),
+              400 => resp("Invalid nickname/password", "ErrorResponse"),
+              409 => resp("nickname_taken", "ErrorResponse")})
+        },
+
+        "/api/v1/account/verify_email" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Verify Email (OTP)", "verify_email",
+            "Confirm the 6-digit code sent at registration. Max 3 attempts, " <>
+            "10-minute expiry.",
+            "VerifyEmailRequest",
+            %{200 => resp("Verified", "OkResponse"),
+              400 => resp("Invalid or expired code", "ErrorResponse"),
+              404 => resp("User not found", "ErrorResponse"),
+              429 => resp("Too many attempts", "ErrorResponse")})
+        },
+
+        "/api/v1/account/resend_otp" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Resend OTP", "resend_otp",
+            "Issue a fresh 6-digit code. Rate-limited to one per 60 seconds.",
+            "ResendOtpRequest",
+            %{200 => resp("Sent", "OkResponse"),
+              404 => resp("User not found", "ErrorResponse"),
+              429 => resp("Rate limited", "ErrorResponse")})
+        },
+
+        "/api/v1/account/forgot_password" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Forgot Password", "forgot_password",
+            "Request a password-reset token by nickname + email. Always " <>
+            "returns 200 (never reveals whether the account exists).",
+            "ForgotPasswordRequest",
+            %{200 => resp("Sent (or silently ignored)", "OkResponse")})
+        },
+
+        "/api/v1/account/reset_password" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Reset Password", "reset_password",
+            "Complete a password reset using the token from forgot_password. " <>
+            "15-minute expiry, max 3 attempts, single use.",
+            "ResetPasswordRequest",
+            %{200 => resp("Password reset", "OkResponse"),
+              400 => resp("Invalid, expired, or mismatched passwords", "ErrorResponse"),
+              404 => resp("No reset requested for this account", "ErrorResponse"),
+              429 => resp("Too many attempts", "ErrorResponse")})
+        },
+
+        "/api/v1/oauth/token" => %OpenApiSpex.PathItem{
+          post: op_auth_body("Login (issue access token)", "login",
+            "Password grant. Verifies credentials, issues a signed access " <>
+            "token (Phoenix.Token, 24h) and creates a session row for " <>
+            "later revoke/logout.",
+            "LoginRequest",
+            %{200 => resp("Logged in", "LoginResponse"),
+              401 => resp("Invalid nickname or password", "ErrorResponse"),
+              403 => resp("Account disabled", "ErrorResponse")}),
+          delete: %OpenApiSpex.Operation{
+            summary: "Logout (revoke current session)", tags: ["Auth"], operationId: "logout",
+            description: "Revokes a specific session id if supplied. The access " <>
+                         "token itself remains cryptographically valid until it " <>
+                         "expires (stateless) — revoking only removes it from " <>
+                         "the active-sessions list.",
+            security: [%{"BearerAuth" => []}],
+            requestBody: OpenApiSpex.Operation.request_body(
+              "Optional session_id", "application/json",
+              %Reference{"$ref": "#/components/schemas/LogoutRequest"}, required: false
+            ),
+            responses: %{200 => resp("Logged out", "OkResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/accounts/verify_credentials" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Get Current Account", tags: ["Auth"], operationId: "verify_credentials",
+            description: "Returns the authenticated DID's profile.",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "AccountResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse"),
+                         404 => resp("Not found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/sessions" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List Active Sessions", tags: ["Auth"], operationId: "list_sessions",
+            description: "Lists this DID's non-revoked login sessions.",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "SessionsResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          },
+          delete: %OpenApiSpex.Operation{
+            summary: "Logout Everywhere", tags: ["Auth"], operationId: "revoke_all_sessions",
+            description: "Revokes every active session for this DID.",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "OkResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/sessions/{id}" => %OpenApiSpex.PathItem{
+          delete: %OpenApiSpex.Operation{
+            summary: "Revoke One Session", tags: ["Auth"], operationId: "revoke_session",
+            description: "Revokes a single session belonging to the authenticated DID.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Revoked", "OkResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse"),
+                         404 => resp("Session not found", "ErrorResponse")}
+          }
+        },
+
         # ── FILES ────────────────────────────────────────────────────────
         "/api/v1/files/sync/blob" => %OpenApiSpex.PathItem{
           post: %OpenApiSpex.Operation{
@@ -52,6 +173,7 @@
               "pipeline's Plug.Parsers will consume before this " <>
               "controller can read the body, silently storing an empty " <>
               "(0-byte) blob.",
+            security: [%{"BearerAuth" => []}],  # ← AUTH: added
             parameters: [
               %OpenApiSpex.Parameter{
                 name: :"x-przma-did", in: :header, required: true,
@@ -84,6 +206,7 @@
             responses: %{
               200 => resp("Stored", "UploadBlobResponse"),
               400 => resp("Missing fields", "ErrorResponse"),
+              401 => resp("Unauthorized", "ErrorResponse"),  # ← AUTH: added
               403 => resp("did_mismatch", "ErrorResponse"),
               500 => resp("Server error", "ErrorResponse")
             }
@@ -115,6 +238,7 @@
           get: %OpenApiSpex.Operation{
             summary: "Download Blob", tags: ["Files"], operationId: "download_blob",
             description: "Download a blob from CAS by its BLAKE3 hash.",
+            security: [%{"BearerAuth" => []}],  # ← AUTH: added
             parameters: [
               %OpenApiSpex.Parameter{
                 name: :hash, in: :path, required: true,
@@ -132,11 +256,12 @@
                 content: %{"application/octet-stream" => %OpenApiSpex.MediaType{
                   schema: %Schema{type: :string, format: :binary}
                 },
-		"application/json" => %OpenApiSpex.MediaType{
+                "application/json" => %OpenApiSpex.MediaType{
                  schema: %Schema{type: :string, format: :binary}
-		}
-		}
+                }
+                }
               },
+              401 => resp("Unauthorized", "ErrorResponse"),  # ← AUTH: added
               404 => resp("Not found", "ErrorResponse")
             }
           }
@@ -206,10 +331,10 @@
                 content: %{"application/octet-stream" => %OpenApiSpex.MediaType{
                   schema: %Schema{type: :string, format: :binary}
                 },
-		"application/json" => %OpenApiSpex.MediaType{
+                "application/json" => %OpenApiSpex.MediaType{
                 schema: %Schema{type: :string, format: :binary}
-		}
-		}
+                }
+                }
               },
               401 => resp("Unauthorized", "ErrorResponse"),
               404 => resp("activity_not_found", "ErrorResponse")
@@ -229,6 +354,20 @@
       },
       components: %Components{
         schemas: %{
+          # Auth
+          "RegisterRequest"         => register_request_schema(),
+          "RegisterResponse"        => register_response_schema(),
+          "VerifyEmailRequest"      => verify_email_request_schema(),
+          "ResendOtpRequest"        => resend_otp_request_schema(),
+          "ForgotPasswordRequest"   => forgot_password_request_schema(),
+          "ResetPasswordRequest"    => reset_password_request_schema(),
+          "LoginRequest"            => login_request_schema(),
+          "LoginResponse"           => login_response_schema(),
+          "LogoutRequest"           => logout_request_schema(),
+          "AccountResponse"         => account_response_schema(),
+          "SessionsResponse"        => sessions_response_schema(),
+          "OkResponse"              => ok_response_schema(),
+
           # Files
           "UploadBlobResponse"   => upload_blob_response_schema(),
           "SyncRecordRequest"    => sync_record_request_schema(),
@@ -252,10 +391,157 @@
         securitySchemes: %{
           "BearerAuth" => %OpenApiSpex.SecurityScheme{
             type: "http", scheme: "bearer",
-            description: ~s(TEST STUB — any "Bearer demo-<value>" token is accepted. ) <>
-                          ~s(Sets conn.assigns[:did] to <value>.)
+            description: "Signed access token from POST /api/v1/oauth/token. " <>
+                         "Contains the DID (HMAC-signed via Phoenix.Token) — " <>
+                         "verification is pure computation, no DB lookup."
           }
         }
+      }
+    }
+  end
+
+  # ===========================================================================
+  # Schemas — Auth
+  # ===========================================================================
+
+  defp register_request_schema do
+    %Schema{
+      type: :object, title: "RegisterRequest",
+      required: [:nickname, :password],
+      properties: %{
+        nickname: %Schema{type: :string, minLength: 1, maxLength: 30, example: "alice"},
+        password: %Schema{type: :string, minLength: 6, example: "hunter22"},
+        email:    %Schema{type: :string, format: :email, example: "alice@example.com"},
+        name:     %Schema{type: :string, nullable: true},
+        bio:      %Schema{type: :string, nullable: true}
+      }
+    }
+  end
+
+  defp register_response_schema do
+    %Schema{
+      type: :object, title: "RegisterResponse",
+      properties: %{
+        message:   %Schema{type: :string},
+        did:       %Schema{type: :string, example: "did:przma:alice"},
+        nickname:  %Schema{type: :string},
+        next_step: %Schema{type: :string}
+      }
+    }
+  end
+
+  defp verify_email_request_schema do
+    %Schema{
+      type: :object, title: "VerifyEmailRequest",
+      required: [:nickname, :code],
+      properties: %{
+        nickname: %Schema{type: :string, example: "alice"},
+        code:     %Schema{type: :string, example: "482913"}
+      }
+    }
+  end
+
+  defp resend_otp_request_schema do
+    %Schema{
+      type: :object, title: "ResendOtpRequest",
+      required: [:nickname],
+      properties: %{nickname: %Schema{type: :string, example: "alice"}}
+    }
+  end
+
+  defp forgot_password_request_schema do
+    %Schema{
+      type: :object, title: "ForgotPasswordRequest",
+      required: [:nickname, :email],
+      properties: %{
+        nickname: %Schema{type: :string, example: "alice"},
+        email:    %Schema{type: :string, format: :email, example: "alice@example.com"}
+      }
+    }
+  end
+
+  defp reset_password_request_schema do
+    %Schema{
+      type: :object, title: "ResetPasswordRequest",
+      required: [:nickname, :token, :password, :password_confirmation],
+      properties: %{
+        nickname:              %Schema{type: :string, example: "alice"},
+        token:                 %Schema{type: :string},
+        password:              %Schema{type: :string, minLength: 6},
+        password_confirmation: %Schema{type: :string, minLength: 6}
+      }
+    }
+  end
+
+  defp login_request_schema do
+    %Schema{
+      type: :object, title: "LoginRequest",
+      required: [:grant_type, :username, :password],
+      properties: %{
+        grant_type: %Schema{type: :string, enum: ["password"], example: "password"},
+        username:   %Schema{type: :string, example: "alice"},
+        password:   %Schema{type: :string, example: "hunter22"}
+      }
+    }
+  end
+
+  defp login_response_schema do
+    %Schema{
+      type: :object, title: "LoginResponse",
+      properties: %{
+        access_token: %Schema{type: :string},
+        token_type:   %Schema{type: :string, example: "Bearer"},
+        expires_in:   %Schema{type: :integer, example: 86_400},
+        did:          %Schema{type: :string, example: "did:przma:alice"},
+        me:           %Schema{type: :string, example: "alice"},
+        is_verified:  %Schema{type: :boolean}
+      }
+    }
+  end
+
+  defp logout_request_schema do
+    %Schema{
+      type: :object, title: "LogoutRequest",
+      properties: %{session_id: %Schema{type: :string, nullable: true}}
+    }
+  end
+
+  defp account_response_schema do
+    %Schema{
+      type: :object, title: "AccountResponse",
+      properties: %{
+        did:          %Schema{type: :string},
+        username:     %Schema{type: :string},
+        display_name: %Schema{type: :string},
+        email:        %Schema{type: :string, nullable: true},
+        bio:          %Schema{type: :string},
+        avatar:       %Schema{type: :string},
+        is_verified:  %Schema{type: :boolean},
+        is_active:    %Schema{type: :boolean},
+        is_admin:     %Schema{type: :boolean},
+        is_moderator: %Schema{type: :boolean},
+        created_at:   %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp sessions_response_schema do
+    %Schema{
+      type: :object, title: "SessionsResponse",
+      properties: %{
+        sessions: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}}
+      }
+    }
+  end
+
+  defp ok_response_schema do
+    %Schema{
+      type: :object, title: "OkResponse",
+      properties: %{
+        ok:        %Schema{type: :boolean, nullable: true},
+        message:   %Schema{type: :string},
+        next_step: %Schema{type: :string, nullable: true},
+        note:      %Schema{type: :string, nullable: true}
       }
     }
   end
@@ -453,7 +739,9 @@
   defp op_files(summary, op_id, desc, responses) do
     %OpenApiSpex.Operation{
       summary: summary, tags: ["Files"], operationId: op_id,
-      description: desc, responses: responses
+      description: desc,
+      security: [%{"BearerAuth" => []}],  # ← AUTH: added
+      responses: responses
     }
   end
 
@@ -461,6 +749,7 @@
     %OpenApiSpex.Operation{
       summary: summary, tags: ["Files"], operationId: op_id,
       description: desc,
+      security: [%{"BearerAuth" => []}],  # ← AUTH: added
       requestBody: OpenApiSpex.Operation.request_body(
         "Request body", "application/json",
         %Reference{"$ref": "#/components/schemas/#{schema_name}"},
@@ -474,6 +763,19 @@
     %OpenApiSpex.Operation{
       summary: summary, tags: ["Social"], operationId: op_id,
       description: desc, security: [%{"BearerAuth" => []}],
+      requestBody: OpenApiSpex.Operation.request_body(
+        "Request body", "application/json",
+        %Reference{"$ref": "#/components/schemas/#{schema_name}"},
+        required: true
+      ),
+      responses: responses
+    }
+  end
+
+  defp op_auth_body(summary, op_id, desc, schema_name, responses) do
+    %OpenApiSpex.Operation{
+      summary: summary, tags: ["Auth"], operationId: op_id,
+      description: desc,
       requestBody: OpenApiSpex.Operation.request_body(
         "Request body", "application/json",
         %Reference{"$ref": "#/components/schemas/#{schema_name}"},
