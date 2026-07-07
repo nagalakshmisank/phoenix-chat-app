@@ -232,6 +232,101 @@ fn json_to_sessions_batch(v: &Value) -> NifResult<RecordBatch> {
     .map_err(err)
 }
 
+fn circle_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",                    DataType::Utf8,    false), // = circle_id
+        Field::new("owner_did",              DataType::Utf8,    false),
+        Field::new("name",                   DataType::Utf8,    false),
+        Field::new("member_count",           DataType::Int64,   false),
+        Field::new("invite_code",            DataType::Utf8,    false),
+        Field::new("invite_link",            DataType::Utf8,    false),
+        Field::new("join_approval_required", DataType::Boolean, false),
+        Field::new("max_members",            DataType::Int64,   false),
+        Field::new("created_at",             DataType::Int64,   false),
+        Field::new("updated_at",             DataType::Int64,   false),
+    ])))
+}
+
+fn circle_member_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",         DataType::Utf8,  false), // "{circle_id}:{member_did}"
+        Field::new("circle_id",  DataType::Utf8,  false),
+        Field::new("member_did", DataType::Utf8,  false),
+        Field::new("owner_did",  DataType::Utf8,  false),
+        Field::new("role",       DataType::Utf8,  true),  // null while pending
+        Field::new("status",     DataType::Utf8,  false), // pending | active | removed
+        Field::new("invited_by", DataType::Utf8,  true),
+        Field::new("joined_at",  DataType::Int64, false),
+        Field::new("updated_at", DataType::Int64, false),
+    ])))
+}
+
+fn circle_invite_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",          DataType::Utf8,  false), // = invite_code
+        Field::new("invite_code", DataType::Utf8,  false),
+        Field::new("circle_id",   DataType::Utf8,  false),
+        Field::new("owner_did",   DataType::Utf8,  false),
+        Field::new("created_at",  DataType::Int64, false),
+    ])))
+}
+
+fn json_to_circle_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let b    = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![s("name")])),
+            Arc::new(Int64Array::from(vec![i64v("member_count")])),
+            Arc::new(StringArray::from(vec![s("invite_code")])),
+            Arc::new(StringArray::from(vec![s("invite_link")])),
+            Arc::new(BooleanArray::from(vec![b("join_approval_required")])),
+            Arc::new(Int64Array::from(vec![i64v("max_members")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+            Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+        ],
+    ).map_err(err)
+}
+
+fn json_to_circle_member_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_member_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("circle_id")])),
+            Arc::new(StringArray::from(vec![s("member_did")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![so("role")])),
+            Arc::new(StringArray::from(vec![s("status")])),
+            Arc::new(StringArray::from(vec![so("invited_by")])),
+            Arc::new(Int64Array::from(vec![i64v("joined_at")])),
+            Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+        ],
+    ).map_err(err)
+}
+
+fn json_to_circle_invite_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_invite_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("invite_code")])),
+            Arc::new(StringArray::from(vec![s("circle_id")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+        ],
+    ).map_err(err)
+}
+
 fn json_to_cas_meta_batch(v: &Value) -> NifResult<RecordBatch> {
     let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
@@ -262,6 +357,9 @@ fn schema_for(table: &str) -> Arc<Schema> {
         "cas_meta" => cas_meta_schema(),
         "auth" => auth_schema(),
         "sessions" => sessions_schema(),
+        "circles"            => circle_schema(),          // ← add
+        "circle_members"     => circle_member_schema(),    // ← add
+        "circle_invites"     => circle_invite_schema(),
         _ => files_schema(),   // existing, untouched
     }
 }
@@ -407,6 +505,9 @@ fn pzdb_upsert(
             "cas_meta"         => json_to_cas_meta_batch(&v)?,
             "auth"             => json_to_auth_batch(&v)?,
             "sessions"         => json_to_sessions_batch(&v)?,
+            "circles"          => json_to_circle_batch(&v)?,          // ← add
+            "circle_members"   => json_to_circle_member_batch(&v)?,   // ← add
+            "circle_invites"   => json_to_circle_invite_batch(&v)?,
             _                  => json_to_files_batch(&v)?,
             
         };

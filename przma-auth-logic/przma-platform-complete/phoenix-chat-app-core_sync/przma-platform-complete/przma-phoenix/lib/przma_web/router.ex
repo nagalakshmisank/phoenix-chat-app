@@ -90,7 +90,7 @@ defmodule PRZMAWeb.Router do
   #   ✅ Encryption support
 
   scope "/api/v1/files", PRZMAWeb do
-    pipe_through :api_binary
+    pipe_through [:api_binary, :require_did_auth]
 
     # Single-device sync (offline upload)
     post "/sync/blob",         FileSyncController, :upload_blob
@@ -111,6 +111,29 @@ defmodule PRZMAWeb.Router do
     get  "/sync/inbox",             SocialSyncController, :list_inbox
     get  "/sync/view/:activity_id", SocialSyncController, :view_activity
     post "/sync/save",              SocialSyncController, :save_to_vault
+  end
+
+  # ── CIRCLES (group membership, roles, invite links, group messaging) ────
+  #
+  # Circle roster + settings live in the OWNER's own DID folder
+  # (social/circle/circles.lance, social/circle/circle_members.lance).
+  # Invite-code → owner_did resolution uses one shared lookup table at
+  # przma-directory/circles/core/invites — the only non-DID-scoped table
+  # in this feature. Group messages reuse ActivitySync.publish/1 under
+  # the hood (space: "circle:{circle_id}"), so they show up in the normal
+  # /api/v1/social/sync/inbox feed for every member.
+
+  scope "/api/v1/circles", PRZMAWeb do
+    pipe_through [:api_binary, :require_did_auth]
+
+    post   "/",                                CircleController, :create
+    post   "/join",                            CircleController, :join
+    get    "/mine",                            CircleController, :mine
+    get    "/:circle_id/members",              CircleController, :members
+    post   "/:circle_id/approve",              CircleController, :approve
+    post   "/:circle_id/deny",                 CircleController, :deny
+    delete "/:circle_id/members/:member_did",  CircleController, :remove_member
+    post   "/:circle_id/messages",             CircleController, :send_message
   end
 
   # ── AUTH (pure Lance — no Postgres) ─────────────────────────────────────
