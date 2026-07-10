@@ -42,6 +42,21 @@ defmodule PRZMA.Social.CircleSync do
     end
   end
 
+  def resolve_owner_did(did, circle_id) do
+    with {:ok, rows} <- read_table(did, "circle_members") do
+      case Enum.find(rows, &(&1["circle_id"] == circle_id)) do
+        %{"owner_did" => owner_did} -> {:ok, owner_did}
+        nil -> {:error, :not_found}
+      end
+    end
+  end
+
+  def get_circle_for(did, circle_id) do
+    with {:ok, owner_did} <- resolve_owner_did(did, circle_id) do
+      get_circle(owner_did, circle_id)
+    end
+  end
+
   # ── JOIN ────────────────────────────────────────────────────────────
   def join_circle(member_did, invite_code) do
     with {:ok, %{"circle_id" => circle_id, "owner_did" => owner_did}} <- resolve_invite(invite_code),
