@@ -47,6 +47,13 @@ defmodule PRZMAWeb.ApiSpec do
         Roles: owner, admin, member, restricted. Status: pending, active,
         removed — status gates access entirely; role only matters once
         status is active.
+
+        ## Deletes are soft
+        `DELETE /api/v1/social/sync/{activity_id}` and
+        `DELETE /api/v1/circles/{circle_id}` mark rows `status: "deleted"`
+        rather than physically removing them, and only ever act on the
+        caller's own copy (sender's own outbox, or a circle the caller
+        owns) — no endpoint reaches into another member's private inbox.
         """
       },
       servers: [
@@ -322,6 +329,27 @@ defmodule PRZMAWeb.ApiSpec do
           }
         },
 
+        # ── SOCIAL: NEW — outbox read ──────────────────────────────────
+        "/api/v1/social/sync/outbox" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List Outbox", tags: ["Social"], operationId: "list_outbox",
+            description: "List the authenticated DID's own sent activities. " <>
+                         "Deleted activities (status = deleted) are excluded.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{
+                name: :since, in: :query, required: false,
+                description: "Unix microseconds — only activities after this timestamp",
+                schema: %Schema{type: :integer}
+              }
+            ],
+            responses: %{
+              200 => resp("OK", "ListOutboxResponse"),
+              401 => resp("Unauthorized", "ErrorResponse")
+            }
+          }
+        },
+
         "/api/v1/social/sync/view/{activity_id}" => %OpenApiSpex.PathItem{
           get: %OpenApiSpex.Operation{
             summary: "View Activity Object", tags: ["Social"], operationId: "view_activity",
@@ -349,6 +377,31 @@ defmodule PRZMAWeb.ApiSpec do
               },
               401 => resp("Unauthorized", "ErrorResponse"),
               404 => resp("activity_not_found", "ErrorResponse")
+            }
+          }
+        },
+
+        # ── SOCIAL: NEW — delete own message ──────────────────────────
+        "/api/v1/social/sync/{activity_id}" => %OpenApiSpex.PathItem{
+          delete: %OpenApiSpex.Operation{
+            summary: "Delete Own Message", tags: ["Social"], operationId: "delete_activity",
+            description: "Soft-deletes an activity from the caller's own " <>
+                         "outbox only (status: deleted). Does not remove " <>
+                         "already-delivered copies from any recipient's " <>
+                         "inbox — deleting someone else's message is not " <>
+                         "supported (would require reading another DID's " <>
+                         "private inbox).",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{
+                name: :activity_id, in: :path, required: true,
+                schema: %Schema{type: :string}
+              }
+            ],
+            responses: %{
+              200 => resp("Deleted", "OkResponse"),
+              401 => resp("Unauthorized", "ErrorResponse"),
+              404 => resp("Not found", "ErrorResponse")
             }
           }
         },
@@ -393,6 +446,39 @@ defmodule PRZMAWeb.ApiSpec do
           }
         },
 
+        # ── CIRCLES: NEW — get / delete a single circle ───────────────
+        "/api/v1/circles/{circle_id}" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Get Circle", tags: ["Circles"], operationId: "show_circle",
+            description: "Returns a single circle's own settings row " <>
+                         "(name, invite link, member_count, etc.) — no " <>
+                         "member list. Resolves the owning DID from the " <>
+                         "caller's own mirrored membership row, so any " <>
+                         "active member (not just the owner) can call this.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("OK", "CircleResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse"),
+                         404 => resp("Not found", "ErrorResponse")}
+          },
+          delete: %OpenApiSpex.Operation{
+            summary: "Delete Circle", tags: ["Circles"], operationId: "delete_circle",
+            description: "Owner only. Soft-deletes the circle " <>
+                         "(status: deleted) — excluded from list_my_circles " <>
+                         "and get_circle afterward. Member rows are not " <>
+                         "individually cleaned up.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Deleted", "OkResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
         "/api/v1/circles/{circle_id}/members" => %OpenApiSpex.PathItem{
           get: %OpenApiSpex.Operation{
             summary: "List Circle Members", tags: ["Circles"], operationId: "list_circle_members",
@@ -404,6 +490,22 @@ defmodule PRZMAWeb.ApiSpec do
             responses: %{200 => resp("OK", "MembersResponse"),
                          401 => resp("Unauthorized", "ErrorResponse"),
                          404 => resp("Not found", "ErrorResponse")}
+          }
+        },
+
+        # ── CIRCLES: NEW — pending join requests ───────────────────────
+        "/api/v1/circles/{circle_id}/pending" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List Pending Join Requests", tags: ["Circles"], operationId: "list_pending_members",
+            description: "Owner/admin only. Lists circle_member rows with " <>
+                         "status = pending, awaiting approve/deny.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("OK", "PendingResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
           }
         },
 
@@ -441,6 +543,24 @@ defmodule PRZMAWeb.ApiSpec do
           }
         },
 
+        # ── CIRCLES: NEW — mute member ─────────────────────────────────
+        "/api/v1/circles/{circle_id}/members/{member_did}/mute" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Mute Member", tags: ["Circles"], operationId: "mute_circle_member",
+            description: "Owner/admin only. Sets the target member's role " <>
+                         "to restricted (can still receive messages and " <>
+                         "stay in the circle, loses send_message).",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
+              %OpenApiSpex.Parameter{name: :member_did, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Muted", "MemberResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
         "/api/v1/circles/{circle_id}/messages" => %OpenApiSpex.PathItem{
           post: %OpenApiSpex.Operation{
             summary: "Send Group Message", tags: ["Circles"], operationId: "send_circle_message",
@@ -461,6 +581,58 @@ defmodule PRZMAWeb.ApiSpec do
                          403 => resp("forbidden", "ErrorResponse"),
                          404 => resp("circle_not_found", "ErrorResponse"),
                          401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
+        # ── CIRCLES: NEW — delete a message ────────────────────────────
+        "/api/v1/circles/{circle_id}/messages/{message_id}" => %OpenApiSpex.PathItem{
+          delete: %OpenApiSpex.Operation{
+            summary: "Delete Own Circle Message", tags: ["Circles"], operationId: "delete_circle_message",
+            description: "Soft-deletes a group message from the sender's " <>
+                         "own outbox only. Deleting someone else's message " <>
+                         "(delete_any) is not implemented — same privacy " <>
+                         "boundary as owner-views-all-inboxes, which was " <>
+                         "deliberately dropped.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
+              %OpenApiSpex.Parameter{name: :message_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Deleted", "OkResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse"),
+                         404 => resp("Not found", "ErrorResponse")}
+          }
+        },
+
+        # ── CIRCLES: NEW — pin / unpin a message ───────────────────────
+        "/api/v1/circles/{circle_id}/messages/{message_id}/pin" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Pin Message", tags: ["Circles"], operationId: "pin_circle_message",
+            description: "Owner/admin only. Adds a row to the circle's " <>
+                         "own circle_pins table (lives in the owner's " <>
+                         "folder) — visible to all members without " <>
+                         "exposing anyone's private inbox.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
+              %OpenApiSpex.Parameter{name: :message_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Pinned", "OkResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          },
+          delete: %OpenApiSpex.Operation{
+            summary: "Unpin Message", tags: ["Circles"], operationId: "unpin_circle_message",
+            description: "Owner/admin only. Marks the pin row unpinned.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
+              %OpenApiSpex.Parameter{name: :message_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Unpinned", "OkResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse"),
+                         404 => resp("Not found", "ErrorResponse")}
           }
         }
       },
@@ -494,6 +666,7 @@ defmodule PRZMAWeb.ApiSpec do
           "SyncActivityRequest"  => sync_activity_request_schema(),
           "SyncActivityResponse" => sync_activity_response_schema(),
           "ListInboxResponse"    => list_inbox_response_schema(),
+          "ListOutboxResponse"   => list_outbox_response_schema(),
           "SaveToVaultRequest"   => save_to_vault_request_schema(),
           "SaveToVaultResponse"  => save_to_vault_response_schema(),
 
@@ -504,6 +677,7 @@ defmodule PRZMAWeb.ApiSpec do
           "JoinCircleResponse"        => join_circle_response_schema(),
           "MyCirclesResponse"         => my_circles_response_schema(),
           "MembersResponse"           => members_response_schema(),
+          "PendingResponse"           => pending_response_schema(),
           "MemberDidRequest"          => member_did_request_schema(),
           "MemberResponse"            => member_response_schema(),
           "SendCircleMessageRequest"  => send_circle_message_request_schema(),
@@ -664,6 +838,7 @@ defmodule PRZMAWeb.ApiSpec do
       properties: %{
         ok:        %Schema{type: :boolean, nullable: true},
         message:   %Schema{type: :string},
+        status:    %Schema{type: :string, nullable: true},
         next_step: %Schema{type: :string, nullable: true},
         note:      %Schema{type: :string, nullable: true}
       }
@@ -821,6 +996,16 @@ defmodule PRZMAWeb.ApiSpec do
     }
   end
 
+  defp list_outbox_response_schema do
+    %Schema{
+      type: :object, title: "ListOutboxResponse",
+      properties: %{
+        activities: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count:      %Schema{type: :integer}
+      }
+    }
+  end
+
   defp save_to_vault_request_schema do
     %Schema{
       type: :object, title: "SaveToVaultRequest",
@@ -870,6 +1055,7 @@ defmodule PRZMAWeb.ApiSpec do
         invite_link: %Schema{type: :string},
         join_approval_required: %Schema{type: :boolean},
         max_members: %Schema{type: :integer},
+        status: %Schema{type: :string, enum: ["active", "deleted"], nullable: true},
         created_at: %Schema{type: :integer},
         updated_at: %Schema{type: :integer}
       }
@@ -910,6 +1096,16 @@ defmodule PRZMAWeb.ApiSpec do
       properties: %{
         members: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
         count: %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp pending_response_schema do
+    %Schema{
+      type: :object, title: "PendingResponse",
+      properties: %{
+        pending: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count:   %Schema{type: :integer}
       }
     }
   end

@@ -104,4 +104,91 @@ defmodule PRZMAWeb.CircleController do
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
   end
+  def show(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    case CircleSync.get_circle_for(did, circle_id) do
+      {:ok, circle} -> json(conn, circle)
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def delete(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        owner_did = circle["owner_did"],
+        {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
+        true <- CirclePermissions.can?("delete_circle", role),
+        {:ok, _} <- CircleSync.delete_circle(owner_did, circle_id) do
+      json(conn, %{status: "deleted"})
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def delete_message(conn, %{"circle_id" => _circle_id, "message_id" => message_id}) do
+    did = conn.assigns[:did]
+    case ActivitySync.delete_activity(did, message_id) do
+      {:ok, _} -> json(conn, %{status: "deleted"})
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def pin_message(conn, %{"circle_id" => circle_id, "message_id" => message_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        owner_did = circle["owner_did"],
+        {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
+        true <- CirclePermissions.can?("delete_edit_others_messages", role),
+        {:ok, _} <- CircleSync.pin_message(owner_did, circle_id, message_id, did) do
+      json(conn, %{status: "pinned"})
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def unpin_message(conn, %{"circle_id" => circle_id, "message_id" => message_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        owner_did = circle["owner_did"],
+        {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
+        true <- CirclePermissions.can?("delete_edit_others_messages", role),
+        {:ok, _} <- CircleSync.unpin_message(owner_did, circle_id, message_id) do
+      json(conn, %{status: "unpinned"})
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def mute_member(conn, %{"circle_id" => circle_id, "member_did" => member_did}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        owner_did = circle["owner_did"],
+        {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
+        true <- CirclePermissions.can?("remove_member", role),
+        {:ok, updated} <- CircleSync.update_role(owner_did, circle_id, member_did, "restricted") do
+      json(conn, updated)
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def pending(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle}   <- CircleSync.get_circle_for(did, circle_id),
+        owner_did       = circle["owner_did"],
+        {:ok, role}     <- CircleSync.get_role(owner_did, circle_id, did),
+        true            <- CirclePermissions.can?("add_member", role),
+        {:ok, rows}     <- CircleSync.list_pending(owner_did, circle_id) do
+      json(conn, %{pending: rows, count: length(rows)})
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
 end

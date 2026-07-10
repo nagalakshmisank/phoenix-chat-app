@@ -110,7 +110,10 @@ defmodule PRZMAWeb.Router do
     post "/sync/activity",          SocialSyncController, :sync_activity
     get  "/sync/inbox",             SocialSyncController, :list_inbox
     get  "/sync/view/:activity_id", SocialSyncController, :view_activity
+    delete "/sync/:activity_id",  SocialSyncController, :delete_activity
     post "/sync/save",              SocialSyncController, :save_to_vault
+    get  "/sync/outbox",            SocialSyncController, :list_outbox
+    
   end
 
   # ── CIRCLES (group membership, roles, invite links, group messaging) ────
@@ -130,10 +133,17 @@ defmodule PRZMAWeb.Router do
     post   "/join",                            CircleController, :join
     get    "/mine",                            CircleController, :mine
     get    "/:circle_id/members",              CircleController, :members
+    get    "/:circle_id",                      CircleController, :show
     post   "/:circle_id/approve",              CircleController, :approve
     post   "/:circle_id/deny",                 CircleController, :deny
     delete "/:circle_id/members/:member_did",  CircleController, :remove_member
     post   "/:circle_id/messages",             CircleController, :send_message
+    delete "/:circle_id",                      CircleController, :delete
+    delete "/:circle_id/messages/:message_id", CircleController, :delete_message
+    post   "/:circle_id/messages/:message_id/pin",   CircleController, :pin_message
+    delete "/:circle_id/messages/:message_id/pin",   CircleController, :unpin_message
+    post "/:circle_id/members/:member_did/mute", CircleController, :mute_member
+    get "/:circle_id/pending",                  CircleController, :pending
   end
 
   # ── AUTH (pure Lance — no Postgres) ─────────────────────────────────────

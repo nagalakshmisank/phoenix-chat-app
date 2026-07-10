@@ -30,6 +30,23 @@ defmodule PRZMA.Social.ActivitySync do
     end
   end
 
+  def list_outbox(did, since \\ nil) do
+    with {:ok, rows} <- read_table(did, "outbox") do
+      visible = Enum.reject(rows, &(&1["status"] == "deleted"))
+      {:ok, filter_since(rows, since)}
+    end
+  end
+
+  def delete_activity(did, activity_id) do
+    with {:ok, rows} <- read_table(did, "outbox"),
+        row when not is_nil(row) <- Enum.find(rows, &(to_string(&1["id"]) == to_string(activity_id))) do
+      updated = Map.merge(row, %{"status" => "deleted", "deleted_at" => System.os_time(:microsecond)})
+      upsert(did, "outbox", updated)
+    else
+      nil -> {:error, :not_found}
+    end
+  end
+
   def get_inbox_row(did, activity_id) do
     with {:ok, rows} <- read_table(did, "inbox") do
       match = Enum.find(rows, fn r ->

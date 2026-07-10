@@ -32,6 +32,28 @@ defmodule PRZMAWeb.SocialSyncController do
     end
   end
 
+  def list_outbox(conn, params) do
+    did = conn.assigns[:did]
+    case ActivitySync.list_outbox(did, parse_since(params["since"])) do
+      {:ok, rows} ->
+        enriched = Enum.map(rows, &add_object_url(&1, conn))
+        conn
+        |> put_resp_content_type("application/activity+json")
+        |> json(%{activities: enriched, count: length(enriched)})
+      {:error, reason} ->
+        conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def delete_activity(conn, %{"activity_id" => activity_id}) do
+    did = conn.assigns[:did]
+    case ActivitySync.delete_activity(did, activity_id) do
+      {:ok, _} -> json(conn, %{status: "deleted"})
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
   def view_activity(conn, %{"activity_id" => activity_id}) do
   did = conn.assigns[:did]
   Logger.info("[view_activity] START did=#{did} activity_id=#{activity_id}")

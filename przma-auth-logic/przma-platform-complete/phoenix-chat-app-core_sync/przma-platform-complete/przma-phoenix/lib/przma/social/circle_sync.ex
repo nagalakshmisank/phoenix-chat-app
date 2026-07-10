@@ -57,6 +57,13 @@ defmodule PRZMA.Social.CircleSync do
     end
   end
 
+  def delete_circle(owner_did, circle_id) do
+    with {:ok, circle} <- get_circle(owner_did, circle_id) do
+      updated = Map.merge(circle, %{"status" => "deleted", "updated_at" => System.os_time(:microsecond)})
+      upsert(owner_did, "circles", updated)
+    end
+  end
+
   # ── JOIN ────────────────────────────────────────────────────────────
   def join_circle(member_did, invite_code) do
     with {:ok, %{"circle_id" => circle_id, "owner_did" => owner_did}} <- resolve_invite(invite_code),
@@ -114,7 +121,11 @@ defmodule PRZMA.Social.CircleSync do
   end
 
   # ── READ ────────────────────────────────────────────────────────────
-  def list_my_circles(did), do: read_table(did, "circle_members")
+  def list_my_circles(did) do
+    with {:ok, rows} <- read_table(did, "circle_members") do
+      {:ok, Enum.reject(rows, &(&1["status"] == "deleted"))}
+    end
+  end
 
   def list_members(owner_did, circle_id) do
     with {:ok, rows} <- read_table(owner_did, "circle_members") do
@@ -124,7 +135,7 @@ defmodule PRZMA.Social.CircleSync do
 
   def get_circle(owner_did, circle_id) do
     with {:ok, rows} <- read_table(owner_did, "circles") do
-      case Enum.find(rows, &(&1["id"] == circle_id)) do
+      case Enum.find(rows, &(&1["id"] == circle_id and &1["status"] != "deleted")) do
         nil -> {:error, :not_found}
         row -> {:ok, row}
       end
@@ -151,6 +162,47 @@ defmodule PRZMA.Social.CircleSync do
   def expand_recipients(owner_did, circle_id) do
     with {:ok, members} <- list_members(owner_did, circle_id) do
       {:ok, Enum.map(members, & &1["member_did"])}
+    end
+  end
+
+  # pin and unpin
+  def pin_message(owner_did, circle_id, message_id, pinned_by) do
+    row = %{
+      "id" => "#{circle_id}:#{message_id}", "circle_id" => circle_id,
+      "message_id" => message_id, "pinned_by" => pinned_by,
+      "pinned_at" => System.os_time(:microsecond)
+    }
+    upsert(owner_did, "circle_pins", row)
+  end
+
+  def unpin_message(owner_did, circle_id, message_id) do
+    with {:ok, rows} <- read_table(owner_did, "circle_pins") do
+      case Enum.find(rows, &(&1["id"] == "#{circle_id}:#{message_id}")) do
+        nil -> {:error, :not_found}
+        row -> upsert(owner_did, "circle_pins", Map.put(row, "status", "unpinned"))
+      end
+    end
+  end
+
+  def list_pins(owner_did, circle_id) do
+    with {:ok, rows} <- read_table(owner_did, "circle_pins") do
+      {:ok, Enum.filter(rows, &(&1["circle_id"] == circle_id and &1["status"] != "unpinned"))}
+    end
+  end
+
+  def update_role(owner_did, circle_id, member_did, new_role) do
+    with {:ok, row} <- get_member(owner_did, circle_id, member_did) do
+      updated = Map.merge(row, %{"role" => new_role, "updated_at" => System.os_time(:microsecond)})
+      with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
+        mirror_to_member(member_did, updated)
+        {:ok, updated}
+      end
+    end
+  end
+
+  def list_pending(owner_did, circle_id) do
+    with {:ok, rows} <- read_table(owner_did, "circle_members") do
+      {:ok, Enum.filter(rows, &(&1["circle_id"] == circle_id and &1["status"] == "pending"))}
     end
   end
 
@@ -219,4 +271,5 @@ defmodule PRZMA.Social.CircleSync do
   defp decode(%{"records" => records}) when is_list(records), do: records
   defp decode(list) when is_list(list), do: list
   defp decode(_), do: []
+  
 end
