@@ -25,7 +25,7 @@ defmodule PRZMAWeb.CircleController do
 
   def approve(conn, %{"circle_id" => circle_id, "member_did" => member_did}) do
     did = conn.assigns[:did]
-    with {:ok, circle} <- CircleSync.get_circle(did, circle_id),
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
          {:ok, role}   <- CircleSync.get_role(circle["owner_did"], circle_id, did),
          true          <- CirclePermissions.can?("add_member", role),
          {:ok, updated} <- CircleSync.approve_member(circle["owner_did"], circle_id, member_did) do
@@ -38,7 +38,7 @@ defmodule PRZMAWeb.CircleController do
 
   def deny(conn, %{"circle_id" => circle_id, "member_did" => member_did}) do
     did = conn.assigns[:did]
-    with {:ok, circle} <- CircleSync.get_circle(did, circle_id),
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
          {:ok, role}   <- CircleSync.get_role(circle["owner_did"], circle_id, did),
          true          <- CirclePermissions.can?("add_member", role),
          {:ok, _}      <- CircleSync.deny_member(circle["owner_did"], circle_id, member_did) do
@@ -51,7 +51,7 @@ defmodule PRZMAWeb.CircleController do
 
   def remove_member(conn, %{"circle_id" => circle_id, "member_did" => target_did}) do
     did = conn.assigns[:did]
-    with {:ok, circle}      <- CircleSync.get_circle(did, circle_id),
+    with {:ok, circle}      <- CircleSync.get_circle_for(did, circle_id),
          {:ok, actor_row}   <- CircleSync.get_member(circle["owner_did"], circle_id, did),
          {:ok, target_row}  <- CircleSync.get_member(circle["owner_did"], circle_id, target_did),
          true               <- CirclePermissions.can_remove?(actor_row["role"], target_row["role"]),
@@ -73,7 +73,7 @@ defmodule PRZMAWeb.CircleController do
 
   def members(conn, %{"circle_id" => circle_id}) do
     did = conn.assigns[:did]
-    with {:ok, circle} <- CircleSync.get_circle(did, circle_id),
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
          {:ok, rows}   <- CircleSync.list_members(circle["owner_did"], circle_id) do
       json(conn, %{members: rows, count: length(rows)})
     else
@@ -84,7 +84,7 @@ defmodule PRZMAWeb.CircleController do
 
   def send_message(conn, %{"circle_id" => circle_id, "raw_json" => raw_json} = params) do
     did = conn.assigns[:did]
-    with {:ok, circle}   <- CircleSync.get_circle(did, circle_id),
+    with {:ok, circle}   <- CircleSync.get_circle_for(did, circle_id),
          owner_did       = circle["owner_did"],
          {:ok, role}     <- CircleSync.get_role(owner_did, circle_id, did),
          true            <- CirclePermissions.can?("send_message", role),

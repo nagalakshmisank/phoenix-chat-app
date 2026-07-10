@@ -271,6 +271,34 @@ fn circle_invite_schema() -> Arc<Schema> {
     ])))
 }
 
+fn circle_pin_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",         DataType::Utf8,  false),
+        Field::new("circle_id",  DataType::Utf8,  false),
+        Field::new("message_id", DataType::Utf8,  false),
+        Field::new("pinned_by",  DataType::Utf8,  false),
+        Field::new("pinned_at",  DataType::Int64, false),
+        Field::new("status",     DataType::Utf8,  true),
+    ])))
+}
+
+fn json_to_circle_pin_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_pin_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("circle_id")])),
+            Arc::new(StringArray::from(vec![s("message_id")])),
+            Arc::new(StringArray::from(vec![s("pinned_by")])),
+            Arc::new(Int64Array::from(vec![i64v("pinned_at")])),
+            Arc::new(StringArray::from(vec![so("status")])),
+        ],
+    ).map_err(err)
+}
+
 fn json_to_circle_batch(v: &Value) -> NifResult<RecordBatch> {
     let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let b    = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
@@ -360,6 +388,7 @@ fn schema_for(table: &str) -> Arc<Schema> {
         "circles"            => circle_schema(),          // ← add
         "circle_members"     => circle_member_schema(),    // ← add
         "circle_invites"     => circle_invite_schema(),
+        "circle_pins"        => circle_pin_schema(),
         _ => files_schema(),   // existing, untouched
     }
 }
@@ -508,6 +537,7 @@ fn pzdb_upsert(
             "circles"          => json_to_circle_batch(&v)?,          // ← add
             "circle_members"   => json_to_circle_member_batch(&v)?,   // ← add
             "circle_invites"   => json_to_circle_invite_batch(&v)?,
+            "circle_pins" => json_to_circle_pin_batch(&v)?,
             _                  => json_to_files_batch(&v)?,
             
         };

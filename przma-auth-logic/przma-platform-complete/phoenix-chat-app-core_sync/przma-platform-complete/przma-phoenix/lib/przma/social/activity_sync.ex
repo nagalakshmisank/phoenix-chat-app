@@ -33,7 +33,7 @@ defmodule PRZMA.Social.ActivitySync do
   def list_outbox(did, since \\ nil) do
     with {:ok, rows} <- read_table(did, "outbox") do
       visible = Enum.reject(rows, &(&1["status"] == "deleted"))
-      {:ok, filter_since(rows, since)}
+      {:ok, filter_since(visible, since)}
     end
   end
 
