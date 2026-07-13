@@ -9,6 +9,13 @@ defmodule PRZMA.Application do
       # {Oban, Application.fetch_env!(:przma, Oban)},
 
       # Phoenix HTTP server
+      #{Plug.Cowboy, scheme: :http, plug: PRZMAWeb.Router, options: [port: 4000]},
+      # Real-time layer — PubSub, Presence, and the Endpoint (websocket only)
+      {Phoenix.PubSub, name: PRZMA.PubSub},
+      PRZMAWeb.Presence,
+      PRZMAWeb.Endpoint,
+
+      # Phoenix HTTP server (REST API — unchanged, still port 4000)
       {Plug.Cowboy, scheme: :http, plug: PRZMAWeb.Router, options: [port: 4000]},
     ]
 

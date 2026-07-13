@@ -95,7 +95,17 @@ if config_env() != :test do
    
 end
 
-port = String.to_integer(System.get_env("PORT") || "4000")
+#port = String.to_integer(System.get_env("PORT") || "4000")
+#config :przma, PRZMAWeb.Endpoint,
+ # http: [ip: {0, 0, 0, 0}, port: port],
+  #secret_key_base: System.get_env("SECRET_KEY_BASE")
+
+socket_port = String.to_integer(System.get_env("SOCKET_PORT") || "4001")
+
 config :przma, PRZMAWeb.Endpoint,
-  http: [ip: {0, 0, 0, 0}, port: port],
-  secret_key_base: System.get_env("SECRET_KEY_BASE")
+  http: [ip: {0, 0, 0, 0}, port: socket_port],
+  secret_key_base:
+    System.get_env("SECRET_KEY_BASE") ||
+      "przma_dev_insecure_secret_key_base_change_me_before_prod_0000000000",
+  pubsub_server: PRZMA.PubSub,
+  server: true

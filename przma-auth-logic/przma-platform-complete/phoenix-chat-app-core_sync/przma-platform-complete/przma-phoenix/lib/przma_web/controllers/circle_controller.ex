@@ -2,6 +2,7 @@ defmodule PRZMAWeb.CircleController do
   use PRZMAWeb, :controller
   alias PRZMA.Social.{CircleSync, CirclePermissions, ActivitySync}
   require Logger
+  @max_message_length 2000
 
   def create(conn, params) do
     did  = conn.assigns[:did]
@@ -84,7 +85,8 @@ defmodule PRZMAWeb.CircleController do
 
   def send_message(conn, %{"circle_id" => circle_id, "raw_json" => raw_json} = params) do
     did = conn.assigns[:did]
-    with {:ok, circle}   <- CircleSync.get_circle_for(did, circle_id),
+    with :ok            <- validate_length(raw_json),
+         {:ok, circle}   <- CircleSync.get_circle_for(did, circle_id),
          owner_did       = circle["owner_did"],
          {:ok, role}     <- CircleSync.get_role(owner_did, circle_id, did),
          true            <- CirclePermissions.can?("send_message", role),
@@ -92,13 +94,17 @@ defmodule PRZMAWeb.CircleController do
       activity = %{
         "id" => params["id"] || "msg_#{circle_id}_#{System.os_time(:microsecond)}",
         "did" => did, "actor" => did, "activity_type" => "Message",
-        "space" => "circle:#{circle_id}", "to" => to_list, "raw_json" => raw_json
+        "space" => "circle:#{circle_id}", "to" => to_list, "raw_json" => raw_json,
+        "object_cas" => params["object_cas"], "object_name" => params["object_name"]
       }
       case ActivitySync.publish(activity) do
-        {:ok, %{outbox_version: v}} -> json(conn, %{id: activity["id"], status: "synced", version: v})
+        {:ok, %{outbox_version: v}} ->
+          PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "new_message", activity)
+          json(conn, %{id: activity["id"], status: "synced", version: v})
         {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
       end
     else
+      {:error, :too_long} -> conn |> put_status(400) |> json(%{error: "message_too_long", max: @max_message_length})
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})
       {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "circle_not_found"})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
@@ -189,6 +195,15 @@ defmodule PRZMAWeb.CircleController do
     else
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  defp validate_length(raw_json) do
+    case Jason.decode(raw_json) do
+      {:ok, %{"content" => content}} when is_binary(content) ->
+        if String.length(content) <= @max_message_length, do: :ok, else: {:error, :too_long}
+      _ ->
+        :ok
     end
   end
 end

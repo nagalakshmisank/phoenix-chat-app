@@ -1,6 +1,8 @@
 defmodule PRZMAWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :przma
 
+  socket "/socket", PRZMAWeb.UserSocket, websocket: true, longpoll: false
+
   @session_options [
     store: :cookie,
     key: "_przma_key",
