@@ -9,6 +9,7 @@ defmodule PRZMAWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json", "activity+json"]
+    plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
     # Parse request bodies. Required because we start the Router directly via
     # Plug.Cowboy (see PRZMA.Application), bypassing the Endpoint's Plug.Parsers.
@@ -22,6 +23,7 @@ defmodule PRZMAWeb.Router do
   
   pipeline :api_binary do
     plug :accepts, ["json", "activity+json", "octet-stream"]
+    plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
     plug Plug.Parsers,
       parsers: [:urlencoded, :multipart, :json],
       pass: ["*/*"],
