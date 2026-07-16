@@ -12,6 +12,7 @@ defmodule PRZMA.Application do
       #{Plug.Cowboy, scheme: :http, plug: PRZMAWeb.Router, options: [port: 4000]},
       # Real-time layer — PubSub, Presence, and the Endpoint (websocket only)
       {Phoenix.PubSub, name: PRZMA.PubSub},
+      PRZMA.PromEx,
       PRZMAWeb.Presence,
       PRZMAWeb.Endpoint,
 

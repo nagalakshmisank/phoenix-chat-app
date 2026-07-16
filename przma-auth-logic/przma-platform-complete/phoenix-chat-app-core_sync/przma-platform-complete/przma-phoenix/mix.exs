@@ -29,6 +29,7 @@ defmodule PRZMA.MixProject do
       {:phoenix, "~> 1.7"},
       {:phoenix_live_view, "~> 0.20"},
       {:plug_cowboy, "~> 2.6"},
+      {:prom_ex, "~> 1.9"},
 
       # OpenAPI / Swagger 
       {:open_api_spex, "~> 3.18"},
