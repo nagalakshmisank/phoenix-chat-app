@@ -26,7 +26,8 @@ defmodule PRZMA.Social.ActivitySync do
 
   def list_inbox(did, since \\ nil) do
     with {:ok, rows} <- read_table(did, "inbox") do
-      {:ok, filter_since(rows, since)}
+      visible = Enum.reject(rows, &(&1["status"] == "deleted"))
+      {:ok, filter_since(visible, since)}
     end
   end
 
@@ -37,13 +38,25 @@ defmodule PRZMA.Social.ActivitySync do
     end
   end
 
-  def delete_activity(did, activity_id) do
-    with {:ok, rows} <- read_table(did, "outbox"),
+  # `box` defaults to "outbox" so the existing single-arg call sites
+  # (e.g. SocialSyncController.delete_activity/2, the caller's own DM feed)
+  # keep working unchanged. Pass "inbox" to delete a recipient's copy.
+  def delete_activity(did, activity_id, box \\ "outbox") do
+    with {:ok, rows} <- read_table(did, box),
         row when not is_nil(row) <- Enum.find(rows, &(to_string(&1["id"]) == to_string(activity_id))) do
       updated = Map.merge(row, %{"status" => "deleted", "deleted_at" => System.os_time(:microsecond)})
-      upsert(did, "outbox", updated)
+      upsert(did, box, updated)
     else
       nil -> {:error, :not_found}
+    end
+  end
+
+  def get_outbox_row(did, activity_id) do
+    with {:ok, rows} <- read_table(did, "outbox") do
+      case Enum.find(rows, &(to_string(&1["id"]) == to_string(activity_id) and &1["status"] != "deleted")) do
+        nil -> {:error, :not_found}
+        row -> {:ok, row}
+      end
     end
   end
 

@@ -165,6 +165,39 @@ defmodule PRZMA.Social.CircleSync do
     end
   end
 
+  # ── DELETE MESSAGE (everywhere) ────────────────────────────────────
+  # Removes the message from the sender's own outbox AND from every
+  # other current member's inbox, so it disappears for sender + receivers.
+  # Members who have already left the circle are not reachable (we only
+  # know the *current* roster via expand_recipients) — their copy is left
+  # untouched, which mirrors how send_message resolves recipients too.
+  def delete_message_everywhere(sender_did, owner_did, circle_id, message_id) do
+    with {:ok, to_list} <- expand_recipients(owner_did, circle_id) do
+      recipients = to_list |> Enum.reject(&(&1 == sender_did)) |> Enum.uniq()
+
+      results =
+        [ActivitySync.delete_activity(sender_did, message_id, "outbox")] ++
+          Enum.map(recipients, &ActivitySync.delete_activity(&1, message_id, "inbox"))
+
+      # :not_found is fine here — it just means that member never had a
+      # copy (e.g. joined after the message was sent) or it was already
+      # deleted; only genuine failures should block the response.
+      failures =
+        Enum.reject(results, fn
+          {:ok, _} -> true
+          {:error, :not_found} -> true
+          _ -> false
+        end)
+
+      if failures == [] do
+        {:ok, :deleted_everywhere}
+      else
+        Logger.warning("[CircleSync] partial delete for message_id=#{message_id} failures=#{inspect(failures)}")
+        {:error, :partial_delete}
+      end
+    end
+  end
+
   # pin and unpin
   def pin_message(owner_did, circle_id, message_id, pinned_by) do
     row = %{

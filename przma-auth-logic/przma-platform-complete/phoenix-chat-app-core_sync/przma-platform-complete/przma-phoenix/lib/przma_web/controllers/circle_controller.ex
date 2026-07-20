@@ -133,12 +133,44 @@ defmodule PRZMAWeb.CircleController do
     end
   end
 
-  def delete_message(conn, %{"circle_id" => _circle_id, "message_id" => message_id}) do
+  def delete_message(conn, %{"circle_id" => circle_id, "message_id" => message_id}) do
     did = conn.assigns[:did]
-    case ActivitySync.delete_activity(did, message_id) do
-      {:ok, _} -> json(conn, %{status: "deleted"})
+    with {:ok, circle}     <- CircleSync.get_circle_for(did, circle_id),
+         owner_did          = circle["owner_did"],
+         {:ok, role}       <- CircleSync.get_role(owner_did, circle_id, did),
+         {:ok, sender_did} <- resolve_sender(did, owner_did, circle_id, message_id),
+         true              <- sender_did == did or CirclePermissions.can?("delete_edit_others_messages", role),
+         {:ok, _}          <- CircleSync.delete_message_everywhere(sender_did, owner_did, circle_id, message_id) do
+      PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "message_deleted", %{"message_id" => message_id})
+      json(conn, %{status: "deleted"})
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
       {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, :partial_delete} -> conn |> put_status(207) |> json(%{status: "partially_deleted"})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  # A message lives only in the sender's own outbox (everyone else just
+  # has an inbox copy), so to know who may delete-for-everyone we first
+  # have to find whose outbox it belongs to. Fast path: the requester is
+  # the sender. Fallback: scan the other current members' outboxes (an
+  # owner/admin moderating someone else's message).
+  defp resolve_sender(did, owner_did, circle_id, message_id) do
+    case ActivitySync.get_outbox_row(did, message_id) do
+      {:ok, _row} ->
+        {:ok, did}
+      {:error, :not_found} ->
+        with {:ok, members} <- CircleSync.expand_recipients(owner_did, circle_id) do
+          members
+          |> Enum.reject(&(&1 == did))
+          |> Enum.find_value({:error, :not_found}, fn member_did ->
+            case ActivitySync.get_outbox_row(member_did, message_id) do
+              {:ok, _row} -> {:ok, member_did}
+              _ -> nil
+            end
+          end)
+        end
     end
   end
 
