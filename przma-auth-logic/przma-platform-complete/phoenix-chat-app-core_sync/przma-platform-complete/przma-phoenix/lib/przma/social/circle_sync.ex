@@ -59,8 +59,27 @@ defmodule PRZMA.Social.CircleSync do
 
   def delete_circle(owner_did, circle_id) do
     with {:ok, circle} <- get_circle(owner_did, circle_id) do
-      updated = Map.merge(circle, %{"status" => "deleted", "updated_at" => System.os_time(:microsecond)})
-      upsert(owner_did, "circles", updated)
+      now = System.os_time(:microsecond)
+      updated_circle = Map.merge(circle, %{"status" => "deleted", "updated_at" => now})
+
+      with {:ok, _} <- upsert(owner_did, "circles", updated_circle),
+           {:ok, members} <- list_members(owner_did, circle_id) do
+        # circle_members rows live in two places: every member's row is
+        # stored in the OWNER's own vault (that's what list_members reads),
+        # and each non-owner member also keeps a mirrored copy of their own
+        # row in their own vault (written by mirror_to_member on join).
+        # Both copies have to be marked deleted, or the circle keeps
+        # showing up in list_my_circles for the owner and/or the member.
+        Enum.each(members, fn member ->
+          deleted_row = Map.merge(member, %{"status" => "deleted", "updated_at" => now})
+          upsert(owner_did, "circle_members", deleted_row)
+          if member["member_did"] != owner_did do
+            mirror_to_member(member["member_did"], deleted_row)
+          end
+        end)
+
+        {:ok, updated_circle}
+      end
     end
   end
 
@@ -123,7 +142,8 @@ defmodule PRZMA.Social.CircleSync do
   # ── READ ────────────────────────────────────────────────────────────
   def list_my_circles(did) do
     with {:ok, rows} <- read_table(did, "circle_members") do
-      {:ok, Enum.reject(rows, &(&1["status"] == "deleted"))}
+      mine = Enum.filter(rows, &(&1["member_did"] == did and &1["status"] != "deleted"))
+      {:ok, mine}
     end
   end
 
