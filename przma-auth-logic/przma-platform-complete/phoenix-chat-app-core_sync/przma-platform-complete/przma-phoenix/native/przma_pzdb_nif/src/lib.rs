@@ -282,6 +282,19 @@ fn circle_pin_schema() -> Arc<Schema> {
     ])))
 }
 
+fn api_call_log_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",          DataType::Utf8,    false),
+        Field::new("did",         DataType::Utf8,    false),
+        Field::new("method",      DataType::Utf8,    false),
+        Field::new("path",        DataType::Utf8,    false),
+        Field::new("status_code", DataType::Int64,   false),
+        Field::new("success",     DataType::Boolean, false),
+        Field::new("duration_ms", DataType::Int64,   false),
+        Field::new("called_at",   DataType::Int64,   false),
+    ])))
+}
+
 fn json_to_circle_pin_batch(v: &Value) -> NifResult<RecordBatch> {
     let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
@@ -295,6 +308,25 @@ fn json_to_circle_pin_batch(v: &Value) -> NifResult<RecordBatch> {
             Arc::new(StringArray::from(vec![s("pinned_by")])),
             Arc::new(Int64Array::from(vec![i64v("pinned_at")])),
             Arc::new(StringArray::from(vec![so("status")])),
+        ],
+    ).map_err(err)
+}
+
+fn json_to_api_call_log_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let b    = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        api_call_log_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("did")])),
+            Arc::new(StringArray::from(vec![s("method")])),
+            Arc::new(StringArray::from(vec![s("path")])),
+            Arc::new(Int64Array::from(vec![i64v("status_code")])),
+            Arc::new(BooleanArray::from(vec![b("success")])),
+            Arc::new(Int64Array::from(vec![i64v("duration_ms")])),
+            Arc::new(Int64Array::from(vec![i64v("called_at")])),
         ],
     ).map_err(err)
 }
@@ -389,6 +421,7 @@ fn schema_for(table: &str) -> Arc<Schema> {
         "circle_members"     => circle_member_schema(),    // ← add
         "circle_invites"     => circle_invite_schema(),
         "circle_pins"        => circle_pin_schema(),
+        "api_call_logs"      => api_call_log_schema(),
         _ => files_schema(),   // existing, untouched
     }
 }
@@ -515,6 +548,35 @@ fn pzdb_provision_table(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_compact(base_path: String, table_path: String) -> NifResult<String> {
+    rt().block_on(async move {
+        let conn = connect(&base_path).execute().await.map_err(err)?;
+        let table = match conn.open_table(&table_path).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok(json!({"status": "ok", "skipped": "table not found"}).to_string()),
+        };
+
+        // NOTE: exact API shape depends on your pinned lancedb version (0.9 here,
+        // per Cargo.toml). If this doesn't compile as-is, check the vendored
+        // `lancedb::table::{OptimizeAction, CompactionOptions}` types for this
+        // exact version — the compaction entry point moved slightly across
+        // 0.9 → 0.10+, same as the connect/open_table API noted at the top of
+        // this file.
+        use lancedb::table::{OptimizeAction, CompactionOptions};
+
+        let stats = table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(err)?;
+
+        Ok(json!({"status": "ok", "table": table_path, "stats": format!("{:?}", stats)}).to_string())
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn pzdb_upsert(
     base_path: String,
     table_path: String,
@@ -538,6 +600,7 @@ fn pzdb_upsert(
             "circle_members"   => json_to_circle_member_batch(&v)?,   // ← add
             "circle_invites"   => json_to_circle_invite_batch(&v)?,
             "circle_pins" => json_to_circle_pin_batch(&v)?,
+            "api_call_logs"    => json_to_api_call_log_batch(&v)?,
             _                  => json_to_files_batch(&v)?,
             
         };

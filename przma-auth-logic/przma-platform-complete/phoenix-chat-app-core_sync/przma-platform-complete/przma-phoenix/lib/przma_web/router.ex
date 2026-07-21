@@ -34,7 +34,14 @@ defmodule PRZMAWeb.Router do
 
   pipeline :require_did_auth do
     plug PRZMAWeb.Plugs.DIDAuth
+    plug PRZMAWeb.Plugs.ApiCallLogger
   end
+
+  pipeline :admin_api do
+    plug :accepts, ["json"]
+    plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+    plug PRZMAWeb.Plugs.AdminBearerAuth
+end
 
   pipeline :openapi do
     plug OpenApiSpex.Plug.PutApiSpec, module: PRZMAWeb.ApiSpec
@@ -169,6 +176,20 @@ defmodule PRZMAWeb.Router do
     get    "/sessions",                    AuthController, :list_sessions
     delete "/sessions/:id",                AuthController, :revoke_session
     delete "/sessions",                    AuthController, :revoke_all_sessions
+  end
+
+  scope "/api/v1", PRZMAWeb do
+    pipe_through [:api, :require_did_auth]
+
+    get "/api_call_logs/mine",         ApiCallLogController, :mine
+    get "/api_call_logs/mine/summary", ApiCallLogController, :mine_summary
+  end
+
+  scope "/api/v1/admin", PRZMAWeb.Admin do
+    pipe_through [:admin_api]
+
+    get "/api_call_logs", ApiCallLogController, :index
+    get "/api_call_logs/summary/:did", ApiCallLogController, :summary
   end
 
   # ── WEBSOCKET ─────────────────────────────────────────────────────────────

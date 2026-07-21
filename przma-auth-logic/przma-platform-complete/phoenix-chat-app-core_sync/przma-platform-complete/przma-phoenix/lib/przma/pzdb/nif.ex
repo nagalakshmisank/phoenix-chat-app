@@ -36,4 +36,7 @@ defmodule PRZMA.PzDb.NIF do
 
   def pzdb_cache_invalidate(_base_path, _table_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_compact(_base_path, _table_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
