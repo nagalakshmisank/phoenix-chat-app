@@ -179,8 +179,11 @@ defmodule PRZMAWeb.CircleController do
     with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
         owner_did = circle["owner_did"],
         {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
-        true <- CirclePermissions.can?("delete_edit_others_messages", role),
+        true <- CirclePermissions.can?("pin_message", role),
         {:ok, _} <- CircleSync.pin_message(owner_did, circle_id, message_id, did) do
+      PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "message_pinned", %{
+        "message_id" => message_id, "pinned_by" => did
+      })
       json(conn, %{status: "pinned"})
     else
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})
@@ -193,11 +196,48 @@ defmodule PRZMAWeb.CircleController do
     with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
         owner_did = circle["owner_did"],
         {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
-        true <- CirclePermissions.can?("delete_edit_others_messages", role),
-        {:ok, _} <- CircleSync.unpin_message(owner_did, circle_id, message_id) do
+        {:ok, pin}  <- CircleSync.get_pin(owner_did, circle_id, message_id),
+        true        <- CirclePermissions.can_unpin?(role, did, pin["pinned_by"]),
+        {:ok, _}    <- CircleSync.unpin_message(owner_did, circle_id, message_id) do
+      PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "message_unpinned", %{"message_id" => message_id})
       json(conn, %{status: "unpinned"})
     else
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def pins(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        {:ok, rows}    <- CircleSync.list_pins(circle["owner_did"], circle_id) do
+      json(conn, %{pins: rows, count: length(rows)})
+    else
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def leave(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    case CircleSync.leave_circle(did, circle_id) do
+      {:ok, _} -> json(conn, %{status: "left"})
+      {:error, :owner_cannot_leave} -> conn |> put_status(400) |> json(%{error: "owner_cannot_leave"})
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def transfer_ownership(conn, %{"circle_id" => circle_id, "new_owner_did" => new_owner_did}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+        owner_did = circle["owner_did"],
+        true <- did == owner_did,
+        {:ok, updated} <- CircleSync.transfer_ownership(owner_did, circle_id, new_owner_did) do
+      json(conn, updated)
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, :target_not_active_member} -> conn |> put_status(400) |> json(%{error: "target_not_active_member"})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
   end

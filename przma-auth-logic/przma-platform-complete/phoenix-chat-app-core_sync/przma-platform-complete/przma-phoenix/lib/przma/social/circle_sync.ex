@@ -18,7 +18,7 @@ defmodule PRZMA.Social.CircleSync do
 
     circle_row = %{
       "id" => circle_id, "owner_did" => owner_did, "name" => name,
-      "member_count" => 1, "invite_code" => invite_code,
+      "member_count" => 1, "audience_count" => 0, "invite_code" => invite_code,
       "invite_link" => "#{base_url}/join/#{invite_code}",
       "join_approval_required" => Map.get(opts, "join_approval_required", true),
       "max_members" => Map.get(opts, "max_members", 256),
@@ -64,21 +64,73 @@ defmodule PRZMA.Social.CircleSync do
 
       with {:ok, _} <- upsert(owner_did, "circles", updated_circle),
            {:ok, members} <- list_members(owner_did, circle_id) do
-        # circle_members rows live in two places: every member's row is
-        # stored in the OWNER's own vault (that's what list_members reads),
-        # and each non-owner member also keeps a mirrored copy of their own
-        # row in their own vault (written by mirror_to_member on join).
-        # Both copies have to be marked deleted, or the circle keeps
-        # showing up in list_my_circles for the owner and/or the member.
-        Enum.each(members, fn member ->
-          deleted_row = Map.merge(member, %{"status" => "deleted", "updated_at" => now})
-          upsert(owner_did, "circle_members", deleted_row)
-          if member["member_did"] != owner_did do
-            mirror_to_member(member["member_did"], deleted_row)
-          end
-        end)
+        failures =
+          members
+          |> Enum.map(fn member ->
+            deleted_row = Map.merge(member, %{"status" => "deleted", "updated_at" => now})
+            row_result = upsert(owner_did, "circle_members", deleted_row)
 
+            mirror_result =
+              if member["member_did"] != owner_did do
+                mirror_to_member(member["member_did"], deleted_row)
+              else
+                {:ok, :self}
+              end
+
+            {member["member_did"], row_result, mirror_result}
+          end)
+          |> Enum.reject(fn {_did, r, m} -> match?({:ok, _}, r) and match?({:ok, _}, m) end)
+
+        if failures != [] do
+          Logger.warning("[CircleSync] delete_circle partial failure circle_id=#{circle_id} failures=#{inspect(failures)}")
+        end
+
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "circle_deleted", %{"circle_id" => circle_id})
         {:ok, updated_circle}
+      end
+    end
+  end
+
+  # ── OWNERSHIP TRANSFER ─────────────────────────────────────────────
+  # Circle + roster "source of truth" rows live in the owner's own vault.
+  # Transferring means: write fresh copies under the new owner's vault,
+  # mark the old ones "transferred" in the old owner's vault, flip the
+  # old owner to "admin" / new owner to "owner", and re-mirror every
+  # member's row so future lookups follow the new owner_did.
+  def transfer_ownership(current_owner_did, circle_id, new_owner_did) do
+    with {:ok, circle} <- get_circle(current_owner_did, circle_id),
+         {:ok, new_owner_row} <- get_member(current_owner_did, circle_id, new_owner_did) do
+      if new_owner_row["status"] != "active" do
+        {:error, :target_not_active_member}
+      else
+        now = System.os_time(:microsecond)
+        new_circle = Map.merge(circle, %{"owner_did" => new_owner_did, "updated_at" => now})
+        old_circle_marker = Map.merge(circle, %{"status" => "transferred", "updated_at" => now})
+
+        with {:ok, members} <- list_members(current_owner_did, circle_id),
+             {:ok, _} <- upsert(new_owner_did, "circles", new_circle),
+             {:ok, _} <- upsert(current_owner_did, "circles", old_circle_marker) do
+          Enum.each(members, fn member ->
+            new_role =
+              cond do
+                member["member_did"] == new_owner_did -> "owner"
+                member["member_did"] == current_owner_did -> "admin"
+                true -> member["role"]
+              end
+
+            updated_row =
+              Map.merge(member, %{"owner_did" => new_owner_did, "role" => new_role, "updated_at" => now})
+
+            upsert(new_owner_did, "circle_members", updated_row)
+            mirror_to_member(member["member_did"], updated_row)
+          end)
+
+          PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "ownership_transferred", %{
+            "circle_id" => circle_id, "new_owner_did" => new_owner_did
+          })
+
+          {:ok, new_circle}
+        end
       end
     end
   end
@@ -87,28 +139,39 @@ defmodule PRZMA.Social.CircleSync do
   def join_circle(member_did, invite_code) do
     with {:ok, %{"circle_id" => circle_id, "owner_did" => owner_did}} <- resolve_invite(invite_code),
          {:ok, circle} <- get_circle(owner_did, circle_id) do
+      role   = capacity_role(circle)
       status = if circle["join_approval_required"], do: "pending", else: "active"
-      now = System.os_time(:microsecond)
+      now    = System.os_time(:microsecond)
 
       roster_row = %{
         "id" => member_row_id(circle_id, member_did), "circle_id" => circle_id,
         "member_did" => member_did, "owner_did" => owner_did,
-        "role" => "member", "status" => status, "invited_by" => member_did,
+        "role" => role, "status" => status, "invited_by" => member_did,
         "joined_at" => now, "updated_at" => now
       }
 
       with {:ok, _} <- upsert(owner_did, "circle_members", roster_row) do
         if status == "active" do
           mirror_to_member(member_did, roster_row)
-          bump_member_count(owner_did, circle_id, 1)
+          bump_count(owner_did, circle_id, role, 1)
           notify_join(member_did, owner_did, circle_id, "Joined")
-          {:ok, %{status: "active", circle_id: circle_id}}
+          {:ok, %{status: "active", circle_id: circle_id, role: role}}
         else
           notify_join(member_did, owner_did, circle_id, "JoinRequest")
-          {:ok, %{status: "pending", circle_id: circle_id}}
+          {:ok, %{status: "pending", circle_id: circle_id, role: role}}
         end
       end
     end
+  end
+
+  # Once member_count has hit max_members, anyone joining after that
+  # lands in "audience" (receive-only) instead of "member" — they still
+  # get in, just without send/pin rights. Tracked separately so audience
+  # joins never count against the cap.
+  defp capacity_role(circle) do
+    member_count = circle["member_count"] || 0
+    max_members  = circle["max_members"] || 256
+    if member_count >= max_members, do: "audience", else: "member"
   end
 
   def approve_member(owner_did, circle_id, member_did) do
@@ -116,7 +179,7 @@ defmodule PRZMA.Social.CircleSync do
       updated = Map.merge(row, %{"status" => "active", "updated_at" => System.os_time(:microsecond)})
       with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
         mirror_to_member(member_did, updated)
-        bump_member_count(owner_did, circle_id, 1)
+        bump_count(owner_did, circle_id, row["role"], 1)
         {:ok, updated}
       end
     end
@@ -133,8 +196,32 @@ defmodule PRZMA.Social.CircleSync do
     with {:ok, target_row} <- get_member(owner_did, circle_id, target_did) do
       updated = Map.merge(target_row, %{"status" => "removed", "updated_at" => System.os_time(:microsecond)})
       with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
-        bump_member_count(owner_did, circle_id, -1)
+        bump_count(owner_did, circle_id, target_row["role"], -1)
         {:ok, updated}
+      end
+    end
+  end
+
+  # ── LEAVE ───────────────────────────────────────────────────────────
+  def leave_circle(member_did, circle_id) do
+    with {:ok, owner_did}  <- resolve_owner_did(member_did, circle_id),
+         {:ok, member_row} <- get_member(owner_did, circle_id, member_did) do
+      if member_row["role"] == "owner" do
+        {:error, :owner_cannot_leave}
+      else
+        now = System.os_time(:microsecond)
+        updated = Map.merge(member_row, %{"status" => "left", "updated_at" => now})
+
+        with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
+          mirror_to_member(member_did, updated)
+          bump_count(owner_did, circle_id, member_row["role"], -1)
+
+          PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_left", %{
+            "circle_id" => circle_id, "member_did" => member_did
+          })
+
+          {:ok, updated}
+        end
       end
     end
   end
@@ -142,9 +229,17 @@ defmodule PRZMA.Social.CircleSync do
   # ── READ ────────────────────────────────────────────────────────────
   def list_my_circles(did) do
     with {:ok, rows} <- read_table(did, "circle_members") do
-      mine = Enum.filter(rows, &(&1["member_did"] == did and &1["status"] != "deleted"))
+      mine =
+        rows
+        |> Enum.filter(&(&1["member_did"] == did and &1["status"] not in ["deleted", "removed", "left"]))
+        |> Enum.filter(&circle_still_active?/1)
+
       {:ok, mine}
     end
+  end
+
+  defp circle_still_active?(%{"owner_did" => owner_did, "circle_id" => circle_id}) do
+    match?({:ok, _}, get_circle(owner_did, circle_id))
   end
 
   def list_members(owner_did, circle_id) do
@@ -155,7 +250,7 @@ defmodule PRZMA.Social.CircleSync do
 
   def get_circle(owner_did, circle_id) do
     with {:ok, rows} <- read_table(owner_did, "circles") do
-      case Enum.find(rows, &(&1["id"] == circle_id and &1["status"] != "deleted")) do
+      case Enum.find(rows, &(&1["id"] == circle_id and &1["status"] not in ["deleted", "transferred"])) do
         nil -> {:error, :not_found}
         row -> {:ok, row}
       end
@@ -218,7 +313,7 @@ defmodule PRZMA.Social.CircleSync do
     end
   end
 
-  # pin and unpin
+  # ── PIN / UNPIN ─────────────────────────────────────────────────────
   def pin_message(owner_did, circle_id, message_id, pinned_by) do
     row = %{
       "id" => "#{circle_id}:#{message_id}", "circle_id" => circle_id,
@@ -233,6 +328,15 @@ defmodule PRZMA.Social.CircleSync do
       case Enum.find(rows, &(&1["id"] == "#{circle_id}:#{message_id}")) do
         nil -> {:error, :not_found}
         row -> upsert(owner_did, "circle_pins", Map.put(row, "status", "unpinned"))
+      end
+    end
+  end
+
+  def get_pin(owner_did, circle_id, message_id) do
+    with {:ok, rows} <- read_table(owner_did, "circle_pins") do
+      case Enum.find(rows, &(&1["id"] == "#{circle_id}:#{message_id}" and &1["status"] != "unpinned")) do
+        nil -> {:error, :not_found}
+        row -> {:ok, row}
       end
     end
   end
@@ -268,10 +372,25 @@ defmodule PRZMA.Social.CircleSync do
     upsert(member_did, "circle_members", mirrored)
   end
 
+  defp bump_count(owner_did, circle_id, "audience", delta),
+    do: bump_audience_count(owner_did, circle_id, delta)
+  defp bump_count(owner_did, circle_id, _role, delta),
+    do: bump_member_count(owner_did, circle_id, delta)
+
   defp bump_member_count(owner_did, circle_id, delta) do
     with {:ok, circle} <- get_circle(owner_did, circle_id) do
       updated = Map.merge(circle, %{
         "member_count" => max((circle["member_count"] || 0) + delta, 0),
+        "updated_at" => System.os_time(:microsecond)
+      })
+      upsert(owner_did, "circles", updated)
+    end
+  end
+
+  defp bump_audience_count(owner_did, circle_id, delta) do
+    with {:ok, circle} <- get_circle(owner_did, circle_id) do
+      updated = Map.merge(circle, %{
+        "audience_count" => max((circle["audience_count"] || 0) + delta, 0),
         "updated_at" => System.os_time(:microsecond)
       })
       upsert(owner_did, "circles", updated)
@@ -324,5 +443,4 @@ defmodule PRZMA.Social.CircleSync do
   defp decode(%{"records" => records}) when is_list(records), do: records
   defp decode(list) when is_list(list), do: list
   defp decode(_), do: []
-  
 end

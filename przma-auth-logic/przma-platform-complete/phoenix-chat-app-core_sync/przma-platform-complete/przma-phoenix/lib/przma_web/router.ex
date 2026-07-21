@@ -146,6 +146,9 @@ defmodule PRZMAWeb.Router do
     delete "/:circle_id/messages/:message_id/pin",   CircleController, :unpin_message
     post "/:circle_id/members/:member_did/mute", CircleController, :mute_member
     get "/:circle_id/pending",                  CircleController, :pending
+    post "/:circle_id/leave",                  CircleController, :leave
+    get  "/:circle_id/pins",                   CircleController, :pins
+    post "/:circle_id/transfer-ownership",     CircleController, :transfer_ownership
   end
 
   # ── AUTH (pure Lance — no Postgres) ─────────────────────────────────────
