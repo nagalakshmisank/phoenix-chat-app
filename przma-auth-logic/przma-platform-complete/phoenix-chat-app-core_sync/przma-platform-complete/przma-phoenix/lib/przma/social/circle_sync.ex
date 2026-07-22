@@ -395,7 +395,7 @@ defmodule PRZMA.Social.CircleSync do
   defp generate_invite_code, do: :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false)
 
   defp mirror_to_member(member_did, roster_row) do
-    mirrored = Map.put(roster_row, "id", member_row_id(roster_row["circle_id"], roster_row["owner_did"]))
+    mirrored = Map.put(roster_row, "id", member_row_id(roster_row["circle_id"], member_did))
     upsert(member_did, "circle_members", mirrored)
   end
 
