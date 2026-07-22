@@ -44,9 +44,14 @@ defmodule PRZMAWeb.ApiSpec do
         approval) → group messages fan out via the existing
         `/api/v1/social/sync/activity` delivery mechanism, so they show up
         in the normal `/api/v1/social/sync/inbox` feed for every member.
-        Roles: owner, admin, member, restricted. Status: pending, active,
-        removed — status gates access entirely; role only matters once
-        status is active.
+
+        Roles: owner, admin, member, restricted, audience. Status: pending,
+        active, removed, left — status gates access entirely; role only
+        matters once status is active. `audience` is assigned automatically
+        to anyone who joins after the circle hits `max_members` — they can
+        receive messages but not send or pin. Ownership can be handed off
+        via transfer-ownership; the outgoing owner becomes a regular
+        `member`.
 
         ## Deletes are soft
         `DELETE /api/v1/social/sync/{activity_id}` and
@@ -54,6 +59,14 @@ defmodule PRZMAWeb.ApiSpec do
         rather than physically removing them, and only ever act on the
         caller's own copy (sender's own outbox, or a circle the caller
         owns) — no endpoint reaches into another member's private inbox.
+
+        ## Realtime
+        The REST endpoints below are mirrored by broadcasts on the
+        `circle:{circle_id}` Phoenix channel topic: `circle_deleted`,
+        `message_pinned`, `message_unpinned`, `member_joined`,
+        `join_requested`, `member_removed`, `member_muted`, `member_left`,
+        `ownership_transferred`. Swagger only exercises the REST side —
+        use a socket client to see the pushes.
         """
       },
       servers: [
@@ -429,7 +442,10 @@ defmodule PRZMAWeb.ApiSpec do
         "/api/v1/circles/join" => %OpenApiSpex.PathItem{
           post: op_circles_body("Join Circle", "join_circle",
             "Join a circle via invite code. Returns active or pending " <>
-            "depending on the circle's join_approval_required setting.",
+            "depending on the circle's join_approval_required setting. " <>
+            "If the circle is already at max_members, the join still " <>
+            "succeeds but the assigned role is \"audience\" instead of " <>
+            "\"member\" (receive-only — no send/pin rights).",
             "JoinCircleRequest",
             %{200 => resp("Joined or pending", "JoinCircleResponse"),
               401 => resp("Unauthorized", "ErrorResponse"),
@@ -466,9 +482,11 @@ defmodule PRZMAWeb.ApiSpec do
           delete: %OpenApiSpex.Operation{
             summary: "Delete Circle", tags: ["Circles"], operationId: "delete_circle",
             description: "Owner only. Soft-deletes the circle " <>
-                         "(status: deleted) — excluded from list_my_circles " <>
-                         "and get_circle afterward. Member rows are not " <>
-                         "individually cleaned up.",
+                         "(status: deleted) and marks every current " <>
+                         "member's roster row deleted too, so it also " <>
+                         "drops out of list_my_circles for the owner and " <>
+                         "every member — not just get_circle. Broadcasts " <>
+                         "circle_deleted on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
@@ -511,7 +529,8 @@ defmodule PRZMAWeb.ApiSpec do
 
         "/api/v1/circles/{circle_id}/approve" => %OpenApiSpex.PathItem{
           post: op_circles_body_with_path("Approve Join Request", "approve_member",
-            "Approve a pending join request. Owner/admin only.",
+            "Approve a pending join request. Owner/admin only. Broadcasts " <>
+            "member_joined on the circle channel.",
             :circle_id, "MemberDidRequest",
             %{200 => resp("Approved", "MemberResponse"),
               403 => resp("forbidden", "ErrorResponse"),
@@ -520,7 +539,8 @@ defmodule PRZMAWeb.ApiSpec do
 
         "/api/v1/circles/{circle_id}/deny" => %OpenApiSpex.PathItem{
           post: op_circles_body_with_path("Deny Join Request", "deny_member",
-            "Deny a pending join request. Owner/admin only.",
+            "Deny a pending join request. Owner/admin only. Broadcasts " <>
+            "member_removed on the circle channel.",
             :circle_id, "MemberDidRequest",
             %{200 => resp("Denied", "OkResponse"),
               403 => resp("forbidden", "ErrorResponse"),
@@ -531,7 +551,8 @@ defmodule PRZMAWeb.ApiSpec do
           delete: %OpenApiSpex.Operation{
             summary: "Remove Member", tags: ["Circles"], operationId: "remove_circle_member",
             description: "Owner can remove anyone; admin cannot remove " <>
-                         "another admin or the owner.",
+                         "another admin or the owner. Broadcasts " <>
+                         "member_removed on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
@@ -543,13 +564,65 @@ defmodule PRZMAWeb.ApiSpec do
           }
         },
 
+        # ── CIRCLES: NEW — leave circle ─────────────────────────────────
+        "/api/v1/circles/{circle_id}/leave" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Leave Circle", tags: ["Circles"], operationId: "leave_circle",
+            description: "Marks the caller's own membership row \"left\" " <>
+                         "(both the owner's authoritative roster copy and " <>
+                         "the caller's own mirrored copy), decrements " <>
+                         "member_count or audience_count depending on the " <>
+                         "caller's role, and broadcasts member_left on the " <>
+                         "circle channel. The owner cannot leave directly — " <>
+                         "transfer ownership first (see transfer-ownership " <>
+                         "below).",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("Left", "OkResponse"),
+                         400 => resp("owner_cannot_leave", "ErrorResponse"),
+                         404 => resp("Not found", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
+        # ── CIRCLES: NEW — transfer ownership ───────────────────────────
+        "/api/v1/circles/{circle_id}/transfer-ownership" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Transfer Ownership", tags: ["Circles"], operationId: "transfer_circle_ownership",
+            description: "Current owner only. Hands the circle over to " <>
+                         "another active member: that member becomes " <>
+                         "\"owner\", the current owner becomes a regular " <>
+                         "\"member\", and the circle + roster source-of-" <>
+                         "truth rows move to the new owner's vault. " <>
+                         "Broadcasts ownership_transferred on the circle " <>
+                         "channel. The target must already be an active " <>
+                         "member of the circle.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            requestBody: OpenApiSpex.Operation.request_body(
+              "Request body", "application/json",
+              %Reference{"$ref": "#/components/schemas/TransferOwnershipRequest"},
+              required: true
+            ),
+            responses: %{200 => resp("Transferred", "CircleResponse"),
+                         400 => resp("target_not_active_member", "ErrorResponse"),
+                         403 => resp("forbidden", "ErrorResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
         # ── CIRCLES: NEW — mute member ─────────────────────────────────
         "/api/v1/circles/{circle_id}/members/{member_did}/mute" => %OpenApiSpex.PathItem{
           post: %OpenApiSpex.Operation{
             summary: "Mute Member", tags: ["Circles"], operationId: "mute_circle_member",
             description: "Owner/admin only. Sets the target member's role " <>
                          "to restricted (can still receive messages and " <>
-                         "stay in the circle, loses send_message).",
+                         "stay in the circle, loses send_message). " <>
+                         "Broadcasts member_muted on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
@@ -589,10 +662,11 @@ defmodule PRZMAWeb.ApiSpec do
           delete: %OpenApiSpex.Operation{
             summary: "Delete Own Circle Message", tags: ["Circles"], operationId: "delete_circle_message",
             description: "Soft-deletes a group message from the sender's " <>
-                         "own outbox only. Deleting someone else's message " <>
-                         "(delete_any) is not implemented — same privacy " <>
-                         "boundary as owner-views-all-inboxes, which was " <>
-                         "deliberately dropped.",
+                         "own outbox AND from every current member's " <>
+                         "inbox copy — including the sender's own " <>
+                         "self-delivered inbox copy (group messages are " <>
+                         "delivered to every member, sender included). " <>
+                         "Broadcasts message_deleted on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
@@ -608,10 +682,12 @@ defmodule PRZMAWeb.ApiSpec do
         "/api/v1/circles/{circle_id}/messages/{message_id}/pin" => %OpenApiSpex.PathItem{
           post: %OpenApiSpex.Operation{
             summary: "Pin Message", tags: ["Circles"], operationId: "pin_circle_message",
-            description: "Owner/admin only. Adds a row to the circle's " <>
-                         "own circle_pins table (lives in the owner's " <>
-                         "folder) — visible to all members without " <>
-                         "exposing anyone's private inbox.",
+            description: "Any active owner/admin/member can pin (not " <>
+                         "audience or restricted). Adds a row to the " <>
+                         "circle's own circle_pins table (lives in the " <>
+                         "owner's folder) — visible to all members " <>
+                         "without exposing anyone's private inbox. " <>
+                         "Broadcasts message_pinned on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
@@ -623,7 +699,10 @@ defmodule PRZMAWeb.ApiSpec do
           },
           delete: %OpenApiSpex.Operation{
             summary: "Unpin Message", tags: ["Circles"], operationId: "unpin_circle_message",
-            description: "Owner/admin only. Marks the pin row unpinned.",
+            description: "Owner/admin can unpin any pinned message; a " <>
+                         "plain member can only unpin a message they " <>
+                         "themselves pinned. Broadcasts message_unpinned " <>
+                         "on the circle channel.",
             security: [%{"BearerAuth" => []}],
             parameters: [
               %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}},
@@ -633,6 +712,24 @@ defmodule PRZMAWeb.ApiSpec do
                          403 => resp("forbidden", "ErrorResponse"),
                          401 => resp("Unauthorized", "ErrorResponse"),
                          404 => resp("Not found", "ErrorResponse")}
+          }
+        },
+
+        # ── CIRCLES: NEW — list current pins ───────────────────────────
+        "/api/v1/circles/{circle_id}/pins" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List Pinned Messages", tags: ["Circles"], operationId: "list_circle_pins",
+            description: "Returns every currently-pinned message for the " <>
+                         "circle (status != unpinned). Meant for a client " <>
+                         "to call once on load to seed the pinned banner, " <>
+                         "before relying on the live message_pinned / " <>
+                         "message_unpinned broadcasts for updates.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}
+            ],
+            responses: %{200 => resp("OK", "PinsResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
           }
         }
       },
@@ -682,6 +779,8 @@ defmodule PRZMAWeb.ApiSpec do
           "MemberResponse"            => member_response_schema(),
           "SendCircleMessageRequest"  => send_circle_message_request_schema(),
           "SendCircleMessageResponse" => send_circle_message_response_schema(),
+          "TransferOwnershipRequest"  => transfer_ownership_request_schema(),
+          "PinsResponse"               => pins_response_schema(),
 
           # Shared
           "ErrorResponse"        => error_response_schema()
@@ -1051,11 +1150,12 @@ defmodule PRZMAWeb.ApiSpec do
         owner_did: %Schema{type: :string},
         name: %Schema{type: :string},
         member_count: %Schema{type: :integer},
+        audience_count: %Schema{type: :integer},
         invite_code: %Schema{type: :string},
         invite_link: %Schema{type: :string},
         join_approval_required: %Schema{type: :boolean},
         max_members: %Schema{type: :integer},
-        status: %Schema{type: :string, enum: ["active", "deleted"], nullable: true},
+        status: %Schema{type: :string, enum: ["active", "deleted", "transferred"], nullable: true},
         created_at: %Schema{type: :integer},
         updated_at: %Schema{type: :integer}
       }
@@ -1075,7 +1175,8 @@ defmodule PRZMAWeb.ApiSpec do
       type: :object, title: "JoinCircleResponse",
       properties: %{
         status: %Schema{type: :string, enum: ["active", "pending"]},
-        circle_id: %Schema{type: :string}
+        circle_id: %Schema{type: :string},
+        role: %Schema{type: :string, enum: ["member", "audience"], nullable: true}
       }
     }
   end
@@ -1126,8 +1227,8 @@ defmodule PRZMAWeb.ApiSpec do
         circle_id: %Schema{type: :string},
         member_did: %Schema{type: :string},
         owner_did: %Schema{type: :string},
-        role: %Schema{type: :string, enum: ["owner", "admin", "member", "restricted"]},
-        status: %Schema{type: :string, enum: ["pending", "active", "removed"]},
+        role: %Schema{type: :string, enum: ["owner", "admin", "member", "restricted", "audience"]},
+        status: %Schema{type: :string, enum: ["pending", "active", "removed", "left"]},
         joined_at: %Schema{type: :integer},
         updated_at: %Schema{type: :integer}
       }
@@ -1152,6 +1253,26 @@ defmodule PRZMAWeb.ApiSpec do
         id: %Schema{type: :string},
         status: %Schema{type: :string, example: "synced"},
         version: %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp transfer_ownership_request_schema do
+    %Schema{
+      type: :object, title: "TransferOwnershipRequest",
+      required: [:new_owner_did],
+      properties: %{
+        new_owner_did: %Schema{type: :string, example: "did:przma:teju"}
+      }
+    }
+  end
+
+  defp pins_response_schema do
+    %Schema{
+      type: :object, title: "PinsResponse",
+      properties: %{
+        pins: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count: %Schema{type: :integer}
       }
     }
   end
