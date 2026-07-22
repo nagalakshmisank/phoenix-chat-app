@@ -249,6 +249,9 @@ defmodule PRZMAWeb.CircleController do
         {:ok, role} <- CircleSync.get_role(owner_did, circle_id, did),
         true <- CirclePermissions.can?("remove_member", role),
         {:ok, updated} <- CircleSync.update_role(owner_did, circle_id, member_did, "restricted") do
+      PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_muted", %{
+        "circle_id" => circle_id, "member_did" => member_did
+      })
       json(conn, updated)
     else
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})

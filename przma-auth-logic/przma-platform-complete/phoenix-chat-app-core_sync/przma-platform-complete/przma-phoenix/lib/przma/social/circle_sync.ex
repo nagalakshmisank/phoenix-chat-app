@@ -95,7 +95,7 @@ defmodule PRZMA.Social.CircleSync do
   # Circle + roster "source of truth" rows live in the owner's own vault.
   # Transferring means: write fresh copies under the new owner's vault,
   # mark the old ones "transferred" in the old owner's vault, flip the
-  # old owner to "admin" / new owner to "owner", and re-mirror every
+  # old owner to "member" / new owner to "owner", and re-mirror every
   # member's row so future lookups follow the new owner_did.
   def transfer_ownership(current_owner_did, circle_id, new_owner_did) do
     with {:ok, circle} <- get_circle(current_owner_did, circle_id),
@@ -114,7 +114,7 @@ defmodule PRZMA.Social.CircleSync do
             new_role =
               cond do
                 member["member_did"] == new_owner_did -> "owner"
-                member["member_did"] == current_owner_did -> "admin"
+                member["member_did"] == current_owner_did -> "member"
                 true -> member["role"]
               end
 
@@ -155,9 +155,19 @@ defmodule PRZMA.Social.CircleSync do
           mirror_to_member(member_did, roster_row)
           bump_count(owner_did, circle_id, role, 1)
           notify_join(member_did, owner_did, circle_id, "Joined")
+
+          PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_joined", %{
+            "circle_id" => circle_id, "member_did" => member_did, "role" => role
+          })
+
           {:ok, %{status: "active", circle_id: circle_id, role: role}}
         else
           notify_join(member_did, owner_did, circle_id, "JoinRequest")
+
+          PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "join_requested", %{
+            "circle_id" => circle_id, "member_did" => member_did
+          })
+
           {:ok, %{status: "pending", circle_id: circle_id, role: role}}
         end
       end
@@ -180,6 +190,11 @@ defmodule PRZMA.Social.CircleSync do
       with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
         mirror_to_member(member_did, updated)
         bump_count(owner_did, circle_id, row["role"], 1)
+
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_joined", %{
+          "circle_id" => circle_id, "member_did" => member_did, "role" => row["role"]
+        })
+
         {:ok, updated}
       end
     end
@@ -188,7 +203,12 @@ defmodule PRZMA.Social.CircleSync do
   def deny_member(owner_did, circle_id, member_did) do
     with {:ok, row} <- get_member(owner_did, circle_id, member_did) do
       updated = Map.merge(row, %{"status" => "removed", "updated_at" => System.os_time(:microsecond)})
-      upsert(owner_did, "circle_members", updated)
+      with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_removed", %{
+          "circle_id" => circle_id, "member_did" => member_did
+        })
+        {:ok, updated}
+      end
     end
   end
 
@@ -197,6 +217,11 @@ defmodule PRZMA.Social.CircleSync do
       updated = Map.merge(target_row, %{"status" => "removed", "updated_at" => System.os_time(:microsecond)})
       with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
         bump_count(owner_did, circle_id, target_row["role"], -1)
+
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_removed", %{
+          "circle_id" => circle_id, "member_did" => target_did
+        })
+
         {:ok, updated}
       end
     end
@@ -281,14 +306,16 @@ defmodule PRZMA.Social.CircleSync do
   end
 
   # ── DELETE MESSAGE (everywhere) ────────────────────────────────────
-  # Removes the message from the sender's own outbox AND from every
-  # other current member's inbox, so it disappears for sender + receivers.
-  # Members who have already left the circle are not reachable (we only
-  # know the *current* roster via expand_recipients) — their copy is left
-  # untouched, which mirrors how send_message resolves recipients too.
+  # Removes the message from the sender's outbox AND from every current
+  # member's inbox — including the sender's OWN inbox copy, since
+  # ActivitySync.publish/1 self-delivers to every `to` entry, and the
+  # sender is always included in `to` (expand_recipients doesn't filter
+  # them out). Skipping the sender here was the bug: their inbox row
+  # survived and re-appeared on the next GET /inbox poll even though the
+  # live "message_deleted" broadcast hid it instantly for anyone watching.
   def delete_message_everywhere(sender_did, owner_did, circle_id, message_id) do
     with {:ok, to_list} <- expand_recipients(owner_did, circle_id) do
-      recipients = to_list |> Enum.reject(&(&1 == sender_did)) |> Enum.uniq()
+      recipients = Enum.uniq(to_list)
 
       results =
         [ActivitySync.delete_activity(sender_did, message_id, "outbox")] ++
