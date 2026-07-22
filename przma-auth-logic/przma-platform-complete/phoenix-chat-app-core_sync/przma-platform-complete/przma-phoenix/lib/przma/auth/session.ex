@@ -6,6 +6,7 @@ defmodule PRZMA.Auth.Session do
   """
 
   alias PRZMA.PzDb
+  require Logger
 
   defp session_uri(did, id), do: "pzdb://#{did}/auth/core/sessions/#{id}"
   defp sessions_table_uri(did), do: "pzdb://#{did}/auth/core/sessions/_"
@@ -21,7 +22,12 @@ defmodule PRZMA.Auth.Session do
       "ip_address" => conn_info[:ip_address],
       "user_agent" => conn_info[:user_agent],
       "issued_at" => now,
-      "last_active_at" => now
+      "last_active_at" => now,
+      "revoked_at" => nil  # must be present (even as NULL) on the first write —
+                            # otherwise Lance's inferred schema never gets this
+                            # column, and list_active's "revoked_at IS NULL"
+                            # filter silently matches nothing instead of
+                            # matching the active session
     }
 
     with :ok <- PzDb.ensure_table(session_uri(did, id)),
@@ -49,10 +55,17 @@ defmodule PRZMA.Auth.Session do
     with {:ok, rows} <- list_active(did) do
       now = System.os_time(:microsecond)
 
-      Enum.each(rows, fn row ->
-        merged = Map.merge(row, %{"revoked_at" => now})
-        PzDb.write(session_uri(did, row["id"]), merged)
-      end)
+      failures =
+        rows
+        |> Enum.map(fn row ->
+          merged = Map.merge(row, %{"revoked_at" => now})
+          {row["id"], PzDb.write(session_uri(did, row["id"]), merged)}
+        end)
+        |> Enum.reject(fn {_id, result} -> match?({:ok, _}, result) end)
+
+      if failures != [] do
+        Logger.warning("[Session] revoke_all partial failure did=#{did} failures=#{inspect(failures)}")
+      end
 
       :ok
     end
