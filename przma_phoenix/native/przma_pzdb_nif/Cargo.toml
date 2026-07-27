@@ -1,0 +1,28 @@
+[package]
+name    = "przma_pzdb_nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "przma_pzdb_nif"
+crate-type = ["cdylib"]
+
+# Versions pinned to match your PROVEN przma-files build (workspace Cargo.toml).
+# These three arrow crates MUST share the exact same version as lancedb expects.
+[dependencies]
+rustler      = "0.36"
+serde_json   = "1"
+tokio        = { version = "1", features = ["full"] }
+futures      = "0.3"
+lancedb      = "0.9"
+arrow-array  = "=52.2.0"
+arrow-schema = "=52.2.0"
+arrow-json   = "=52.2.0"
+
+# If `mix compile` dies inside the `lance` crate with a type-recursion / overflow
+# error (the one you hit before), switch to:
+#   lancedb = "0.10"   and   arrow-array/arrow-schema/arrow-json = "53"
+# The connect/open_table/add/query API used in lib.rs is identical across them.
+
+# Do NOT add `panic = "abort"` — it stops Rustler from catching NIF panics and a
+# panic would take down the whole BEAM instead of raising an Elixir error.
