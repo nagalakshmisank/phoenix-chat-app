@@ -9,12 +9,14 @@ defmodule PRZMAWeb.SocialSyncController do
   def sync_activity(conn, params) do
     auth_did = conn.assigns[:did]
     with :ok <- verify_did(auth_did, params["did"]),
-         :ok <- require_fields(params, ~w(id did actor activity_type space to raw_json)),
+         :ok <- require_fields(params, ~w(id did actor activity_type space to raw_json user_type)),
+         :ok <- validate_user_type(params["user_type"]),
          {:ok, %{outbox_version: version}} <- ActivitySync.publish(params) do
-      json(conn, %{id: params["id"], status: "synced", version: version})
+      json(conn, %{id: params["id"], status: "synced", version: version, user_type: params["user_type"]})
     else
       {:error, :did_mismatch} -> conn |> put_status(403) |> json(%{error: "did_mismatch"})
       {:error, {:missing_fields, f}} -> conn |> put_status(400) |> json(%{error: "missing: #{Enum.join(f, ", ")}"})
+      {:error, :invalid_user_type} -> conn |> put_status(400) |> json(%{error: "user_type must be \"person\" or \"agent\""})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
   end
@@ -152,4 +154,7 @@ end
       missing -> {:error, {:missing_fields, missing}}
     end
   end
+
+  defp validate_user_type(t) when t in ["person", "agent"], do: :ok
+  defp validate_user_type(_), do: {:error, :invalid_user_type}
 end

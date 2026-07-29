@@ -108,6 +108,7 @@ fn activity_schema() -> Arc<Schema> {
         Field::new("status",        DataType::Utf8,  false),
         Field::new("created_at",    DataType::Int64, false),
         Field::new("saved_file_id", DataType::Utf8,  true),
+        Field::new("user_type",     DataType::Utf8,  false),  // NEW — "person" | "agent"
     ])))
 }
 
@@ -397,6 +398,11 @@ fn json_to_activity_batch(v: &Value) -> NifResult<RecordBatch> {
     let s  = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let so = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let user_type = v.get("user_type")
+        .and_then(Value::as_str)
+        .filter(|s| *s == "person" || *s == "agent")
+        .ok_or_else(|| err("user_type is required and must be \"person\" or \"agent\""))?
+        .to_string();
     RecordBatch::try_new(
         activity_schema(),
         vec![
@@ -413,6 +419,7 @@ fn json_to_activity_batch(v: &Value) -> NifResult<RecordBatch> {
             Arc::new(StringArray::from(vec![s("status")])),
             Arc::new(Int64Array::from(vec![i64v("created_at")])),
             Arc::new(StringArray::from(vec![so("saved_file_id")])),
+            Arc::new(StringArray::from(vec![user_type])),
         ],
     ).map_err(err)
 }

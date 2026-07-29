@@ -117,7 +117,8 @@ defmodule PRZMA.Social.ActivitySync do
     "raw_json"      => enriched_raw,
     "status"        => status,
     "created_at"    => params["created_at"] || params["created_at_micros"] || System.os_time(:microsecond),
-    "saved_file_id" => nil
+    "saved_file_id" => nil,
+    "user_type"     => params["user_type"]
   }
   end
  defp enrich_raw_json(raw_json, nil, _actor), do: raw_json

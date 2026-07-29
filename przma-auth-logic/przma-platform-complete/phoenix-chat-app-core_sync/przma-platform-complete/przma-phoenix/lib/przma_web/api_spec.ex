@@ -1044,13 +1044,19 @@ defmodule PRZMAWeb.ApiSpec do
   defp sync_activity_request_schema do
     %Schema{
       type: :object, title: "SyncActivityRequest",
-      required: [:id, :did, :actor, :activity_type, :space, :to, :raw_json],
+      required: [:id, :did, :actor, :activity_type, :space, :to, :raw_json, :user_type],
       properties: %{
         id:            %Schema{type: :string, example: "act_001"},
         did:           %Schema{type: :string, example: "did:example:alice"},
         actor:         %Schema{type: :string, example: "did:example:alice"},
         activity_type: %Schema{type: :string, example: "Create"},
         space:         %Schema{type: :string, example: "circle"},
+        user_type: %Schema{
+          type: :string, enum: ["person", "agent"],
+          description: "Whether the actor performing this activity is a " <>
+                       "human person or an automated agent.",
+          example: "person"
+        },
         to: %Schema{
           oneOf: [
             %Schema{type: :array, items: %Schema{type: :string}},
@@ -1078,9 +1084,10 @@ defmodule PRZMAWeb.ApiSpec do
     %Schema{
       type: :object, title: "SyncActivityResponse",
       properties: %{
-        id:      %Schema{type: :string},
-        status:  %Schema{type: :string, example: "synced"},
-        version: %Schema{type: :integer}
+        id:        %Schema{type: :string},
+        status:    %Schema{type: :string, example: "synced"},
+        version:   %Schema{type: :integer},
+        user_type: %Schema{type: :string, enum: ["person", "agent"], example: "person"}
       }
     }
   end
