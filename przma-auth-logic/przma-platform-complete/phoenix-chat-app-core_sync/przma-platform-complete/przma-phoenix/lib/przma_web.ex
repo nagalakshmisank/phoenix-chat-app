@@ -51,11 +51,27 @@ defmodule PRZMAWeb do
     end
   end
 
+  def live_view do
+    quote do
+      use Phoenix.LiveView, layout: false
+      unquote(html_helpers())
+    end
+  end
+
+  defp html_helpers do
+    quote do
+      use Phoenix.Component
+      import Phoenix.HTML
+    end
+  end
+
   def router do
     quote do
       use Phoenix.Router
       import Plug.Conn
       import Phoenix.Controller
+      # added: required for the `live` / `live_session` macros in router.ex
+      import Phoenix.LiveView.Router
     end
   end
 

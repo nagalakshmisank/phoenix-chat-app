@@ -15,7 +15,7 @@ defmodule PRZMA.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :inets],
       mod: {PRZMA.Application, []}
     ]
   end
@@ -80,4 +80,3 @@ defmodule PRZMA.MixProject do
     ]
   end
 end
-

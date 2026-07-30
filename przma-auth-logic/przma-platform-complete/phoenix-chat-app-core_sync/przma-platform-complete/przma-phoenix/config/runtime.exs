@@ -107,5 +107,6 @@ config :przma, PRZMAWeb.Endpoint,
   secret_key_base:
     System.get_env("SECRET_KEY_BASE") ||
       "przma_dev_insecure_secret_key_base_change_me_before_prod_0000000000",
+  live_view: [signing_salt: "przma_console_signing_salt_change_me"],   
   pubsub_server: PRZMA.PubSub,
   server: true
