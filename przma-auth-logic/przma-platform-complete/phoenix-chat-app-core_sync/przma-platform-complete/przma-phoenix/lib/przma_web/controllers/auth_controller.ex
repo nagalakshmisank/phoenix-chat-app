@@ -160,6 +160,16 @@ defmodule PRZMAWeb.AuthController do
     end
   end
 
+  # PATCH /api/v1/account/settings  { "nickname", "bio", "avatar", "is_private" }
+  def update_settings(conn, params) do
+    did = conn.assigns[:did]
+
+    case Auth.update_settings(did, params) do
+      {:ok, account} -> json(conn, account)
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
   # DELETE /oauth/token  — logout current session   { "session_id": "..." }  (optional)
   def logout(conn, params) do
     did = conn.assigns[:did]

@@ -148,6 +148,7 @@ fn auth_schema() -> Arc<Schema> {
         Field::new("is_admin",               DataType::Boolean, false),
         Field::new("is_moderator",           DataType::Boolean, false),
         Field::new("is_verified",            DataType::Boolean, false),
+        Field::new("is_private",             DataType::Boolean, false), // NEW — default true
         Field::new("otp_code",               DataType::Utf8,    true),
         Field::new("otp_expires_at",         DataType::Int64,   true),
         Field::new("otp_attempts",           DataType::Int32,   false),
@@ -198,6 +199,12 @@ fn json_to_auth_batch(v: &Value) -> NifResult<RecordBatch> {
             Arc::new(BooleanArray::from(vec![b("is_admin")])),
             Arc::new(BooleanArray::from(vec![b("is_moderator")])),
             Arc::new(BooleanArray::from(vec![b("is_verified")])),
+            Arc::new(BooleanArray::from(vec![{
+                match v.get("is_private").and_then(Value::as_bool) {
+                    Some(val) => val,
+                    None => true, // default true — matches account_settings_visibility_toggle spec
+                }
+            }])),
             Arc::new(StringArray::from(vec![so("otp_code")])),
             Arc::new(Int64Array::from(vec![i64o("otp_expires_at")])),
             Arc::new(Int32Array::from(vec![i32v("otp_attempts")])),
@@ -238,7 +245,9 @@ fn circle_schema() -> Arc<Schema> {
         Field::new("id",                    DataType::Utf8,    false), // = circle_id
         Field::new("owner_did",              DataType::Utf8,    false),
         Field::new("name",                   DataType::Utf8,    false),
+        Field::new("visibility",             DataType::Utf8,    false), // NEW — "private" | "public"
         Field::new("member_count",           DataType::Int64,   false),
+        Field::new("follower_count",         DataType::Int64,   false), // NEW
         Field::new("invite_code",            DataType::Utf8,    false),
         Field::new("invite_link",            DataType::Utf8,    false),
         Field::new("join_approval_required", DataType::Boolean, false),
@@ -254,12 +263,102 @@ fn circle_member_schema() -> Arc<Schema> {
         Field::new("circle_id",  DataType::Utf8,  false),
         Field::new("member_did", DataType::Utf8,  false),
         Field::new("owner_did",  DataType::Utf8,  false),
+        Field::new("contact_id", DataType::Utf8,  true),  // NEW — nullable (null while pending)
+        Field::new("join_method",DataType::Utf8,  true),  // NEW — "direct_add" | "link_approved" | "owner"
         Field::new("role",       DataType::Utf8,  true),  // null while pending
         Field::new("status",     DataType::Utf8,  false), // pending | active | removed
         Field::new("invited_by", DataType::Utf8,  true),
         Field::new("joined_at",  DataType::Int64, false),
         Field::new("updated_at", DataType::Int64, false),
     ])))
+}
+
+fn circle_follower_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",          DataType::Utf8,  false), // "{circle_id}:{follower_did}"
+        Field::new("circle_id",   DataType::Utf8,  false),
+        Field::new("follower_did",DataType::Utf8,  false),
+        Field::new("contact_id",  DataType::Utf8,  true),  // null until suggestion approved
+        Field::new("followed_at", DataType::Int64, false),
+    ])))
+}
+
+fn json_to_circle_follower_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_follower_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("circle_id")])),
+            Arc::new(StringArray::from(vec![s("follower_did")])),
+            Arc::new(StringArray::from(vec![so("contact_id")])),
+            Arc::new(Int64Array::from(vec![i64v("followed_at")])),
+        ],
+    ).map_err(err)
+}
+
+// NEW — directory-scoped table (przma-directory/circles/circle_public_index),
+// written by CircleSync.maybe_index_public/5 for every public circle. Not
+// specified in IMPLEMENTATION_GUIDE.md §1 despite being referenced in §1.5 —
+// row shape here matches exactly what §3.1's maybe_index_public/5 writes.
+fn circle_public_index_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",         DataType::Utf8,  false), // = circle_id
+        Field::new("circle_id",  DataType::Utf8,  false),
+        Field::new("owner_did",  DataType::Utf8,  false),
+        Field::new("name",       DataType::Utf8,  false),
+        Field::new("status",     DataType::Utf8,  false), // active | hidden
+        Field::new("created_at", DataType::Int64, false),
+    ])))
+}
+
+fn json_to_circle_public_index_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        circle_public_index_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("circle_id")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![s("name")])),
+            Arc::new(StringArray::from(vec![s("status")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+        ],
+    ).map_err(err)
+}
+
+// NEW — person-to-person follow (follow_a_person_flow.png). Written to BOTH
+// the follower's and the target's vault (see Follows.follow/2 in
+// lib/przma/social/follows.ex) so each side can read their own copy without
+// cross-vault reads.
+fn person_follow_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",           DataType::Utf8,  false), // "{follower_did}:{target_did}"
+        Field::new("follower_did", DataType::Utf8,  false),
+        Field::new("target_did",   DataType::Utf8,  false),
+        Field::new("status",       DataType::Utf8,  false), // active | pending | denied
+        Field::new("created_at",   DataType::Int64, false),
+        Field::new("updated_at",   DataType::Int64, false),
+    ])))
+}
+
+fn json_to_person_follow_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        person_follow_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("follower_did")])),
+            Arc::new(StringArray::from(vec![s("target_did")])),
+            Arc::new(StringArray::from(vec![s("status")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+            Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+        ],
+    ).map_err(err)
 }
 
 fn circle_invite_schema() -> Arc<Schema> {
@@ -310,7 +409,12 @@ fn json_to_circle_batch(v: &Value) -> NifResult<RecordBatch> {
             Arc::new(StringArray::from(vec![s("id")])),
             Arc::new(StringArray::from(vec![s("owner_did")])),
             Arc::new(StringArray::from(vec![s("name")])),
+            Arc::new(StringArray::from(vec![{
+                let vis = s("visibility");
+                if vis.is_empty() { "private".to_string() } else { vis }
+            }])),
             Arc::new(Int64Array::from(vec![i64v("member_count")])),
+            Arc::new(Int64Array::from(vec![i64v("follower_count")])),
             Arc::new(StringArray::from(vec![s("invite_code")])),
             Arc::new(StringArray::from(vec![s("invite_link")])),
             Arc::new(BooleanArray::from(vec![b("join_approval_required")])),
@@ -332,11 +436,109 @@ fn json_to_circle_member_batch(v: &Value) -> NifResult<RecordBatch> {
             Arc::new(StringArray::from(vec![s("circle_id")])),
             Arc::new(StringArray::from(vec![s("member_did")])),
             Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![so("contact_id")])),
+            Arc::new(StringArray::from(vec![so("join_method")])),
             Arc::new(StringArray::from(vec![so("role")])),
             Arc::new(StringArray::from(vec![s("status")])),
             Arc::new(StringArray::from(vec![so("invited_by")])),
             Arc::new(Int64Array::from(vec![i64v("joined_at")])),
             Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+        ],
+    ).map_err(err)
+}
+
+fn contact_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",                    DataType::Utf8,    false),
+        Field::new("owner_did",             DataType::Utf8,    false),
+        Field::new("entity_type",           DataType::Utf8,    false), // person | company | agent
+        Field::new("contact_ref",           DataType::Utf8,    false),
+        Field::new("contact_ref_type",      DataType::Utf8,    false), // did | agent_id
+        Field::new("contact_type_id",       DataType::Utf8,    true),  // null = unclassified
+        Field::new("is_emergency_contact",  DataType::Boolean, false),
+        Field::new("company_name",          DataType::Utf8,    true),
+        Field::new("source",                DataType::Utf8,    false), // manual|lookup|agent|invite|follow
+        Field::new("status",                DataType::Utf8,    false), // active|pending|removed
+        Field::new("created_at",            DataType::Int64,   false),
+        Field::new("updated_at",            DataType::Int64,   false),
+    ])))
+}
+
+fn contact_type_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",          DataType::Utf8,    false),
+        Field::new("owner_did",   DataType::Utf8,    true),  // null = built-in system type
+        Field::new("name",        DataType::Utf8,    false),
+        Field::new("description", DataType::Utf8,    true),
+        Field::new("is_system",   DataType::Boolean,  false),
+    ])))
+}
+
+fn contact_suggestion_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",                    DataType::Utf8,  false),
+        Field::new("owner_did",             DataType::Utf8,  false),
+        Field::new("suggested_contact_ref", DataType::Utf8,  false),
+        Field::new("entity_type",           DataType::Utf8,  false),
+        Field::new("source",                DataType::Utf8,  false),
+        Field::new("status",                DataType::Utf8,  false), // pending|approved|dismissed
+        Field::new("created_at",            DataType::Int64, false),
+    ])))
+}
+
+fn json_to_contact_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so   = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let b    = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        contact_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![s("entity_type")])),
+            Arc::new(StringArray::from(vec![s("contact_ref")])),
+            Arc::new(StringArray::from(vec![s("contact_ref_type")])),
+            Arc::new(StringArray::from(vec![so("contact_type_id")])),
+            Arc::new(BooleanArray::from(vec![b("is_emergency_contact")])),
+            Arc::new(StringArray::from(vec![so("company_name")])),
+            Arc::new(StringArray::from(vec![s("source")])),
+            Arc::new(StringArray::from(vec![s("status")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
+            Arc::new(Int64Array::from(vec![i64v("updated_at")])),
+        ],
+    ).map_err(err)
+}
+
+fn json_to_contact_type_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s  = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let b  = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    RecordBatch::try_new(
+        contact_type_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![so("owner_did")])),
+            Arc::new(StringArray::from(vec![s("name")])),
+            Arc::new(StringArray::from(vec![so("description")])),
+            Arc::new(BooleanArray::from(vec![b("is_system")])),
+        ],
+    ).map_err(err)
+}
+
+fn json_to_contact_suggestion_batch(v: &Value) -> NifResult<RecordBatch> {
+    let s    = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let i64v = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+    RecordBatch::try_new(
+        contact_suggestion_schema(),
+        vec![
+            Arc::new(StringArray::from(vec![s("id")])),
+            Arc::new(StringArray::from(vec![s("owner_did")])),
+            Arc::new(StringArray::from(vec![s("suggested_contact_ref")])),
+            Arc::new(StringArray::from(vec![s("entity_type")])),
+            Arc::new(StringArray::from(vec![s("source")])),
+            Arc::new(StringArray::from(vec![s("status")])),
+            Arc::new(Int64Array::from(vec![i64v("created_at")])),
         ],
     ).map_err(err)
 }
@@ -390,6 +592,12 @@ fn schema_for(table: &str) -> Arc<Schema> {
         "circle_members"     => circle_member_schema(),    // ← add
         "circle_invites"     => circle_invite_schema(),
         "circle_pins"        => circle_pin_schema(),
+        "circle_followers"     => circle_follower_schema(),     // NEW
+        "circle_public_index"  => circle_public_index_schema(), // NEW — see §4 of guide
+        "person_follows"       => person_follow_schema(),       // NEW — person-to-person follow
+        "contacts"              => contact_schema(),            // NEW
+        "contact_types"         => contact_type_schema(),       // NEW
+        "contact_suggestions"   => contact_suggestion_schema(), // NEW
         _ => files_schema(),   // existing, untouched
     }
 }
@@ -545,6 +753,12 @@ fn pzdb_upsert(
             "circle_members"   => json_to_circle_member_batch(&v)?,   // ← add
             "circle_invites"   => json_to_circle_invite_batch(&v)?,
             "circle_pins" => json_to_circle_pin_batch(&v)?,
+            "circle_followers"      => json_to_circle_follower_batch(&v)?,       // NEW
+            "circle_public_index"   => json_to_circle_public_index_batch(&v)?,   // NEW
+            "person_follows"        => json_to_person_follow_batch(&v)?,         // NEW
+            "contacts"               => json_to_contact_batch(&v)?,             // NEW
+            "contact_types"          => json_to_contact_type_batch(&v)?,        // NEW
+            "contact_suggestions"    => json_to_contact_suggestion_batch(&v)?,   // NEW
             _                  => json_to_files_batch(&v)?,
             
         };

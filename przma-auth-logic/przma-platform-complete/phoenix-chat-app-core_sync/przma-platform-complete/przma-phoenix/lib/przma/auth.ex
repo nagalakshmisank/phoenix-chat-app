@@ -48,6 +48,7 @@ defmodule PRZMA.Auth do
         "is_admin" => false,
         "is_moderator" => false,
         "is_verified" => false,
+        "is_private" => Map.get(attrs, "is_private", true),
         "otp_code" => nil,
         "otp_expires_at" => nil,
         "otp_attempts" => 0,
@@ -188,6 +189,33 @@ defmodule PRZMA.Auth do
     end
   end
 
+  @doc """
+  Update nickname/bio/avatar/is_private (account_settings_visibility_toggle.png).
+  Only the fields present in `attrs` are changed; everything else is left
+  untouched. is_private defaults to true when not yet set on the row, per
+  the "existing accounts default to is_private: true until changed" note.
+  """
+  def update_settings(did, attrs) do
+    with {:ok, row} <- fetch_row(did) do
+      updated =
+        Map.merge(row, %{
+          "nickname" => attrs["nickname"] || row["nickname"],
+          "bio" => Map.get(attrs, "bio", row["bio"]),
+          "avatar" => Map.get(attrs, "avatar", row["avatar"]),
+          "is_private" =>
+            case attrs["is_private"] do
+              b when is_boolean(b) -> b
+              _ -> if is_boolean(row["is_private"]), do: row["is_private"], else: true
+            end,
+          "updated_at" => System.os_time(:microsecond)
+        })
+
+      with {:ok, _} <- PzDb.write(auth_uri(did), updated) do
+        {:ok, render_account(updated)}
+      end
+    end
+  end
+
   defp render_account(row) do
     %{
       did: row["did"],
@@ -196,6 +224,7 @@ defmodule PRZMA.Auth do
       email: row["email"],
       bio: row["bio"] || "",
       avatar: row["avatar"] || "",
+      is_private: if(is_boolean(row["is_private"]), do: row["is_private"], else: true),
       is_verified: row["is_verified"],
       is_active: row["is_active"],
       is_admin: row["is_admin"],

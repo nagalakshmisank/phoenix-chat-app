@@ -134,6 +134,7 @@ defmodule PRZMAWeb.Router do
     post   "/",                                CircleController, :create
     post   "/join",                            CircleController, :join
     get    "/mine",                            CircleController, :mine
+    get    "/discover",                        CircleController, :discover
     get    "/:circle_id/members",              CircleController, :members
     get    "/:circle_id",                      CircleController, :show
     post   "/:circle_id/approve",              CircleController, :approve
@@ -149,6 +150,34 @@ defmodule PRZMAWeb.Router do
     post "/:circle_id/leave",                  CircleController, :leave
     get  "/:circle_id/pins",                   CircleController, :pins
     post "/:circle_id/transfer-ownership",     CircleController, :transfer_ownership
+
+    post "/:circle_id/follow",                 CircleController, :follow
+    post "/:circle_id/members/from-contact",   CircleController, :add_member
+  end
+
+  # ── CONTACTS (contacts, classification, follow-suggestions) ─────────────
+  scope "/api/v1/contacts", PRZMAWeb do
+    pipe_through [:api_binary, :require_did_auth]
+
+    get  "/lookup",                             ContactController, :lookup
+    post "/",                                   ContactController, :create
+    get  "/",                                   ContactController, :index
+    post "/classify",                           ContactController, :classify
+    get  "/types",                              ContactController, :types
+    get  "/suggestions",                        ContactController, :suggestions
+    post "/suggestions/:suggestion_id/approve", ContactController, :approve_suggestion
+    post "/suggestions/:suggestion_id/dismiss", ContactController, :dismiss_suggestion
+  end
+
+  # ── PEOPLE (person-to-person follow — follow_a_person_flow.png) ─────────
+  # NOT in IMPLEMENTATION_GUIDE.md — gap-fill for account-level privacy.
+  scope "/api/v1/people", PRZMAWeb do
+    pipe_through [:api_binary, :require_did_auth]
+
+    post "/:did/follow",  PeopleController, :follow
+    post "/:did/approve", PeopleController, :approve
+    post "/:did/deny",    PeopleController, :deny
+    get  "/pending",      PeopleController, :pending
   end
 
   # ── AUTH (pure Lance — no Postgres) ─────────────────────────────────────
@@ -168,6 +197,7 @@ defmodule PRZMAWeb.Router do
     pipe_through [:api, :require_did_auth]
 
     get    "/accounts/verify_credentials", AuthController, :verify_credentials
+    patch  "/account/settings",            AuthController, :update_settings
     delete "/oauth/token",                 AuthController, :logout
     get    "/sessions",                    AuthController, :list_sessions
     delete "/sessions/:id",                AuthController, :revoke_session

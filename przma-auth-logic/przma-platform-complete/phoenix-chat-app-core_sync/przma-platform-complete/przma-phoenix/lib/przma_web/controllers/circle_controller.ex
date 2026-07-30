@@ -7,7 +7,7 @@ defmodule PRZMAWeb.CircleController do
   def create(conn, params) do
     did  = conn.assigns[:did]
     name = params["name"] || "Untitled Circle"
-    opts = Map.take(params, ["join_approval_required", "max_members"])
+    opts = Map.take(params, ["join_approval_required", "max_members", "visibility"])
 
     case CircleSync.create_circle(did, name, opts) do
       {:ok, circle}    -> json(conn, circle)
@@ -269,6 +269,36 @@ defmodule PRZMAWeb.CircleController do
       json(conn, %{pending: rows, count: length(rows)})
     else
       false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def add_member(conn, %{"circle_id" => circle_id, "contact_id" => contact_id}) do
+    did = conn.assigns[:did]
+    with {:ok, circle} <- CircleSync.get_circle_for(did, circle_id),
+         owner_did      = circle["owner_did"],
+         {:ok, role}    <- CircleSync.get_role(owner_did, circle_id, did),
+         true           <- CirclePermissions.can?("add_member", role),
+         {:ok, member}  <- CircleSync.add_member_from_contact(owner_did, circle_id, contact_id) do
+      json(conn, member)
+    else
+      false -> conn |> put_status(403) |> json(%{error: "forbidden"})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def discover(conn, _params) do
+    case CircleSync.discover_public_circles() do
+      {:ok, rows} -> json(conn, %{circles: rows, count: length(rows)})
+      {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
+    end
+  end
+
+  def follow(conn, %{"circle_id" => circle_id}) do
+    did = conn.assigns[:did]
+    case CircleSync.follow_circle(did, circle_id) do
+      {:ok, result} -> json(conn, result)
+      {:error, :not_found} -> conn |> put_status(404) |> json(%{error: "not_found"})
       {:error, reason} -> conn |> put_status(500) |> json(%{error: inspect(reason)})
     end
   end

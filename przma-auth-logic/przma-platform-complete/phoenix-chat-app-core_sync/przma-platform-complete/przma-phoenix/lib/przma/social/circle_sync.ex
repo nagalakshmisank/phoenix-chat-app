@@ -15,10 +15,13 @@ defmodule PRZMA.Social.CircleSync do
     invite_code = generate_invite_code()
     now         = System.os_time(:microsecond)
     base_url    = Application.get_env(:przma, :base_url, "http://172.235.18.126:4201")
+    visibility  = Map.get(opts, "visibility", "private")
 
     circle_row = %{
       "id" => circle_id, "owner_did" => owner_did, "name" => name,
-      "member_count" => 1, "audience_count" => 0, "invite_code" => invite_code,
+      "visibility" => visibility,
+      "member_count" => 1, "follower_count" => 0, "audience_count" => 0,
+      "invite_code" => invite_code,
       "invite_link" => "#{base_url}/join/#{invite_code}",
       "join_approval_required" => Map.get(opts, "join_approval_required", true),
       "max_members" => Map.get(opts, "max_members", 256),
@@ -28,6 +31,7 @@ defmodule PRZMA.Social.CircleSync do
     owner_row = %{
       "id" => member_row_id(circle_id, owner_did), "circle_id" => circle_id,
       "member_did" => owner_did, "owner_did" => owner_did,
+      "contact_id" => nil, "join_method" => "owner",
       "role" => "owner", "status" => "active", "invited_by" => owner_did,
       "joined_at" => now, "updated_at" => now
     }
@@ -37,8 +41,105 @@ defmodule PRZMA.Social.CircleSync do
          {:ok, _} <- upsert_raw(directory_dir(), "circle_invites", %{
            "id" => invite_code, "invite_code" => invite_code,
            "circle_id" => circle_id, "owner_did" => owner_did, "created_at" => now
-         }) do
+         }),
+         {:ok, _} <- maybe_index_public(visibility, circle_id, owner_did, name, now) do
       {:ok, circle_row}
+    end
+  end
+
+  defp maybe_index_public("public", circle_id, owner_did, name, now) do
+    upsert_raw(directory_dir(), "circle_public_index", %{
+      "id" => circle_id, "circle_id" => circle_id, "owner_did" => owner_did,
+      "name" => name, "status" => "active", "created_at" => now
+    })
+  end
+  defp maybe_index_public(_private, _circle_id, _owner_did, _name, _now), do: {:ok, :skipped}
+
+  # Owner-only. No approval. Requires an existing, active Contact row —
+  # CircleMember.contact_id is never nil for a row created this way.
+  def add_member_from_contact(owner_did, circle_id, contact_id) do
+    with {:ok, contact} <- PRZMA.Social.Contacts.get_contact(owner_did, contact_id),
+         true <- contact["status"] == "active" || {:error, :contact_not_active},
+         {:ok, _circle} <- get_circle(owner_did, circle_id) do
+      now = System.os_time(:microsecond)
+      member_did = contact["contact_ref"]
+
+      roster_row = %{
+        "id" => member_row_id(circle_id, member_did), "circle_id" => circle_id,
+        "member_did" => member_did, "owner_did" => owner_did,
+        "contact_id" => contact_id, "join_method" => "direct_add",
+        "role" => "member", "status" => "active", "invited_by" => owner_did,
+        "joined_at" => now, "updated_at" => now
+      }
+
+      with {:ok, _} <- upsert(owner_did, "circle_members", roster_row) do
+        if contact["entity_type"] == "person", do: mirror_to_member(member_did, roster_row)
+        bump_count(owner_did, circle_id, "member", 1)
+
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "member_joined", %{
+          "circle_id" => circle_id, "member_did" => member_did, "role" => "member"
+        })
+
+        {:ok, roster_row}
+      end
+    end
+  end
+
+  # ── PUBLIC CIRCLE DISCOVERY + FOLLOW ─────────────────────────────────
+  def discover_public_circles(limit \\ 50) do
+    case NIF.pzdb_read_many(directory_dir(), "circle_public_index", "status = 'active'", limit, 0) do
+      {:ok, json} -> {:ok, decode(json)}
+      json when is_binary(json) -> {:ok, decode(json)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # No approval, no contact_id yet — mirrors the public-circle-follow scenario.
+  def follow_circle(follower_did, circle_id) do
+    with {:ok, [%{"owner_did" => owner_did} | _]} <-
+           (case NIF.pzdb_read_many(directory_dir(), "circle_public_index",
+                   "circle_id = '#{circle_id}' and status = 'active'", 1, 0) do
+              {:ok, json} -> {:ok, decode(json)}
+              json when is_binary(json) -> {:ok, decode(json)}
+            end) do
+      now = System.os_time(:microsecond)
+      follower_row = %{
+        "id" => "#{circle_id}:#{follower_did}", "circle_id" => circle_id,
+        "follower_did" => follower_did, "contact_id" => nil, "followed_at" => now
+      }
+
+      with {:ok, _} <- upsert(owner_did, "circle_followers", follower_row) do
+        bump_follower_count(owner_did, circle_id, 1)
+        PRZMA.Social.Contacts.create_suggestion(owner_did, follower_did, "person", "follow")
+
+        PRZMAWeb.Endpoint.broadcast("circle:#{circle_id}", "new_follower", %{
+          "circle_id" => circle_id, "follower_did" => follower_did
+        })
+
+        {:ok, %{status: "following", circle_id: circle_id}}
+      end
+    else
+      {:ok, []} -> {:error, :not_found}
+    end
+  end
+
+  # Called after Contacts.approve_suggestion/2 to link the follower row.
+  def link_follower_contact(owner_did, circle_id, follower_did, contact_id) do
+    with {:ok, rows} <- read_table(owner_did, "circle_followers") do
+      case Enum.find(rows, &(&1["id"] == "#{circle_id}:#{follower_did}")) do
+        nil -> {:error, :not_found}
+        row -> upsert(owner_did, "circle_followers", Map.put(row, "contact_id", contact_id))
+      end
+    end
+  end
+
+  defp bump_follower_count(owner_did, circle_id, delta) do
+    with {:ok, circle} <- get_circle(owner_did, circle_id) do
+      updated = Map.merge(circle, %{
+        "follower_count" => max((circle["follower_count"] || 0) + delta, 0),
+        "updated_at" => System.os_time(:microsecond)
+      })
+      upsert(owner_did, "circles", updated)
     end
   end
 
@@ -146,6 +247,7 @@ defmodule PRZMA.Social.CircleSync do
       roster_row = %{
         "id" => member_row_id(circle_id, member_did), "circle_id" => circle_id,
         "member_did" => member_did, "owner_did" => owner_did,
+        "contact_id" => nil, "join_method" => "link_approved",
         "role" => role, "status" => status, "invited_by" => member_did,
         "joined_at" => now, "updated_at" => now
       }
@@ -185,8 +287,12 @@ defmodule PRZMA.Social.CircleSync do
   end
 
   def approve_member(owner_did, circle_id, member_did) do
-    with {:ok, row} <- get_member(owner_did, circle_id, member_did) do
-      updated = Map.merge(row, %{"status" => "active", "updated_at" => System.os_time(:microsecond)})
+    with {:ok, row}     <- get_member(owner_did, circle_id, member_did),
+         {:ok, contact} <- PRZMA.Social.Contacts.ensure_contact_for_did(owner_did, member_did, "invite") do
+      updated = Map.merge(row, %{
+        "status" => "active", "contact_id" => contact["id"],
+        "updated_at" => System.os_time(:microsecond)
+      })
       with {:ok, _} <- upsert(owner_did, "circle_members", updated) do
         mirror_to_member(member_did, updated)
         bump_count(owner_did, circle_id, row["role"], 1)

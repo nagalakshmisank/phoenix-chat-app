@@ -731,6 +731,164 @@ defmodule PRZMAWeb.ApiSpec do
             responses: %{200 => resp("OK", "PinsResponse"),
                          401 => resp("Unauthorized", "ErrorResponse")}
           }
+        },
+
+        # ── Circles: public discovery + follow (IMPLEMENTATION_GUIDE.md §7) ──
+        "/api/v1/circles/discover" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Discover public circles", tags: ["Circles"], operationId: "discover_circles",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "MyCirclesResponse")}
+          }
+        },
+
+        "/api/v1/circles/{circle_id}/follow" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Follow a public circle", tags: ["Circles"], operationId: "follow_circle",
+            description: "Instant, no approval. Also creates a pending ContactSuggestion for the owner.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [%OpenApiSpex.Parameter{name: :circle_id, in: :path, required: true, schema: %Schema{type: :string}}],
+            responses: %{200 => resp("Following", "OkResponse"), 404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/circles/{circle_id}/members/from-contact" => %OpenApiSpex.PathItem{
+          post: op_circles_body_with_path("Add member directly from contacts", "add_member_from_contact",
+            "Owner/admin only. No approval — writes CircleMember.contact_id immediately.",
+            :circle_id, "AddMemberFromContactRequest",
+            %{200 => resp("Added", "MemberResponse"), 403 => resp("forbidden", "ErrorResponse")})
+        },
+
+        # ── Contacts (IMPLEMENTATION_GUIDE.md §7) ────────────────────────────
+        "/api/v1/contacts/lookup" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Lookup contact by nickname", tags: ["Contacts"], operationId: "lookup_contact",
+            description: "Resolves did:przma:<nickname> deterministically and confirms the account exists.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [%OpenApiSpex.Parameter{name: :nickname, in: :query, required: true, schema: %Schema{type: :string}}],
+            responses: %{200 => resp("Found", "LookupResponse"), 404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/contacts" => %OpenApiSpex.PathItem{
+          post: op_circles_body("Add contact", "add_contact",
+            "Owner-initiated add: manual, lookup, or agent source.",
+            "AddContactRequest",
+            %{200 => resp("Created", "ContactResponse"), 401 => resp("Unauthorized", "ErrorResponse")}),
+          get: %OpenApiSpex.Operation{
+            summary: "List contacts", tags: ["Contacts"], operationId: "list_contacts",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "ContactsListResponse")}
+          }
+        },
+
+        "/api/v1/contacts/classify" => %OpenApiSpex.PathItem{
+          post: op_circles_body("Classify contact", "classify_contact",
+            "Assign a ContactType (friend/family/colleague/ai_contact/custom) to an existing contact.",
+            "ClassifyContactRequest",
+            %{200 => resp("Updated", "ContactResponse"), 401 => resp("Unauthorized", "ErrorResponse")})
+        },
+
+        "/api/v1/contacts/types" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List contact types", tags: ["Contacts"], operationId: "list_contact_types",
+            description: "Returns the 5 system types (friend, family, colleague, related_person, ai_contact) plus any custom types this owner created.",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "ContactTypesResponse")}
+          }
+        },
+
+        "/api/v1/contacts/suggestions" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List pending contact suggestions", tags: ["Contacts"], operationId: "list_suggestions",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "SuggestionsResponse")}
+          }
+        },
+
+        "/api/v1/contacts/suggestions/{suggestion_id}/approve" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Approve contact suggestion", tags: ["Contacts"], operationId: "approve_suggestion",
+            description: "Creates the Contact row (source: follow) and marks the suggestion approved.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [%OpenApiSpex.Parameter{name: :suggestion_id, in: :path, required: true, schema: %Schema{type: :string}}],
+            responses: %{200 => resp("Contact created", "ContactResponse"), 404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/contacts/suggestions/{suggestion_id}/dismiss" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Dismiss contact suggestion", tags: ["Contacts"], operationId: "dismiss_suggestion",
+            security: [%{"BearerAuth" => []}],
+            parameters: [%OpenApiSpex.Parameter{name: :suggestion_id, in: :path, required: true, schema: %Schema{type: :string}}],
+            responses: %{200 => resp("Dismissed", "OkResponse"), 404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        # ── Account settings (account_settings_visibility_toggle.png) ───────
+        "/api/v1/account/settings" => %OpenApiSpex.PathItem{
+          patch: %OpenApiSpex.Operation{
+            summary: "Update Account Settings", tags: ["Auth"], operationId: "update_settings",
+            description: "Update nickname, bio, avatar, or is_private. Existing and " <>
+                         "new accounts default is_private to true until changed.",
+            security: [%{"BearerAuth" => []}],
+            requestBody: OpenApiSpex.Operation.request_body(
+              "Request body", "application/json",
+              %Reference{"$ref": "#/components/schemas/AccountSettingsRequest"},
+              required: true
+            ),
+            responses: %{200 => resp("Updated", "AccountResponse"),
+                         401 => resp("Unauthorized", "ErrorResponse")}
+          }
+        },
+
+        # ── People — person-to-person follow (follow_a_person_flow.png) ─────
+        # NOT in IMPLEMENTATION_GUIDE.md — gap-fill for account-level privacy.
+        "/api/v1/people/{did}/follow" => %OpenApiSpex.PathItem{
+          post: op_people_body_with_path("Follow a person", "follow_person",
+            "Instant if the target's account is public (is_private: false). " <>
+            "If private, creates a pending follow request awaiting the target's " <>
+            "approve/deny. Either way, creates a pending ContactSuggestion for the target.",
+            :did, "FollowPersonRequest",
+            %{200 => resp("Following or pending", "PersonFollowResponse"),
+              404 => resp("not_found", "ErrorResponse")})
+        },
+
+        "/api/v1/people/{did}/approve" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Approve a follow request", tags: ["People"], operationId: "approve_follow",
+            description: "Owner-only. Moves a pending follow to active.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :did, in: :path, required: true, schema: %Schema{type: :string},
+                description: "DID of the follower whose request is being approved"}
+            ],
+            responses: %{200 => resp("Approved", "PersonFollowResponse"),
+                         404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/people/{did}/deny" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Deny a follow request", tags: ["People"], operationId: "deny_follow",
+            description: "Owner-only. Moves a pending follow to denied.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :did, in: :path, required: true, schema: %Schema{type: :string},
+                description: "DID of the follower whose request is being denied"}
+            ],
+            responses: %{200 => resp("Denied", "PersonFollowResponse"),
+                         404 => resp("not_found", "ErrorResponse")}
+          }
+        },
+
+        "/api/v1/people/pending" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "List pending follow requests", tags: ["People"], operationId: "list_pending_follows",
+            description: "Follow requests awaiting this account's approve/deny (private-account inbound follows only).",
+            security: [%{"BearerAuth" => []}],
+            responses: %{200 => resp("OK", "PendingFollowsResponse")}
+          }
         }
       },
       components: %Components{
@@ -746,6 +904,7 @@ defmodule PRZMAWeb.ApiSpec do
           "LoginResponse"           => login_response_schema(),
           "LogoutRequest"           => logout_request_schema(),
           "AccountResponse"         => account_response_schema(),
+          "AccountSettingsRequest"  => account_settings_request_schema(),
           "SessionsResponse"        => sessions_response_schema(),
           "OkResponse"              => ok_response_schema(),
 
@@ -781,6 +940,21 @@ defmodule PRZMAWeb.ApiSpec do
           "SendCircleMessageResponse" => send_circle_message_response_schema(),
           "TransferOwnershipRequest"  => transfer_ownership_request_schema(),
           "PinsResponse"               => pins_response_schema(),
+
+          # Contacts
+          "AddContactRequest"           => add_contact_request_schema(),
+          "ClassifyContactRequest"      => classify_contact_request_schema(),
+          "ContactResponse"             => contact_response_schema(),
+          "ContactsListResponse"        => contacts_list_response_schema(),
+          "ContactTypesResponse"        => contact_types_response_schema(),
+          "LookupResponse"              => lookup_response_schema(),
+          "SuggestionsResponse"         => suggestions_response_schema(),
+          "AddMemberFromContactRequest" => add_member_from_contact_request_schema(),
+
+          # People (person-to-person follow — not in IMPLEMENTATION_GUIDE.md)
+          "FollowPersonRequest"     => follow_person_request_schema(),
+          "PersonFollowResponse"    => person_follow_response_schema(),
+          "PendingFollowsResponse"  => pending_follows_response_schema(),
 
           # Shared
           "ErrorResponse"        => error_response_schema()
@@ -913,11 +1087,24 @@ defmodule PRZMAWeb.ApiSpec do
         email:        %Schema{type: :string, nullable: true},
         bio:          %Schema{type: :string},
         avatar:       %Schema{type: :string},
+        is_private:   %Schema{type: :boolean, description: "Defaults true. Gates whether following this account is instant or requires approval."},
         is_verified:  %Schema{type: :boolean},
         is_active:    %Schema{type: :boolean},
         is_admin:     %Schema{type: :boolean},
         is_moderator: %Schema{type: :boolean},
         created_at:   %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp account_settings_request_schema do
+    %Schema{
+      type: :object, title: "AccountSettingsRequest",
+      properties: %{
+        nickname:   %Schema{type: :string, nullable: true},
+        bio:        %Schema{type: :string, nullable: true},
+        avatar:     %Schema{type: :string, nullable: true},
+        is_private: %Schema{type: :boolean, nullable: true, description: "Defaults true if unset"}
       }
     }
   end
@@ -1143,6 +1330,7 @@ defmodule PRZMAWeb.ApiSpec do
       required: [:name],
       properties: %{
         name: %Schema{type: :string, example: "College Friends"},
+        visibility: %Schema{type: :string, enum: ["private", "public"], default: "private"},
         join_approval_required: %Schema{type: :boolean, default: true},
         max_members: %Schema{type: :integer, default: 256}
       }
@@ -1156,7 +1344,9 @@ defmodule PRZMAWeb.ApiSpec do
         id: %Schema{type: :string},
         owner_did: %Schema{type: :string},
         name: %Schema{type: :string},
+        visibility: %Schema{type: :string, enum: ["private", "public"]},
         member_count: %Schema{type: :integer},
+        follower_count: %Schema{type: :integer},
         audience_count: %Schema{type: :integer},
         invite_code: %Schema{type: :string},
         invite_link: %Schema{type: :string},
@@ -1288,6 +1478,138 @@ defmodule PRZMAWeb.ApiSpec do
   # Shared schema
   # ===========================================================================
 
+  # ===========================================================================
+  # Schemas — Contacts (IMPLEMENTATION_GUIDE.md §7)
+  # ===========================================================================
+
+  defp add_contact_request_schema do
+    %Schema{
+      type: :object, title: "AddContactRequest",
+      required: [:entity_type, :contact_ref, :source],
+      properties: %{
+        entity_type: %Schema{type: :string, enum: ["person", "company", "agent"]},
+        contact_ref: %Schema{type: :string, description: "DID, or agent_id for entity_type=agent"},
+        contact_ref_type: %Schema{type: :string, enum: ["did", "agent_id"], default: "did"},
+        contact_type_id: %Schema{type: :string, nullable: true, description: "nil = unclassified"},
+        is_emergency_contact: %Schema{type: :boolean, default: false},
+        company_name: %Schema{type: :string, nullable: true},
+        source: %Schema{type: :string, enum: ["manual", "lookup", "agent", "invite", "follow"]}
+      }
+    }
+  end
+
+  defp classify_contact_request_schema do
+    %Schema{
+      type: :object, title: "ClassifyContactRequest",
+      required: [:contact_id, :contact_type_id],
+      properties: %{
+        contact_id: %Schema{type: :string},
+        contact_type_id: %Schema{type: :string}
+      }
+    }
+  end
+
+  defp contact_response_schema do
+    %Schema{
+      type: :object, title: "ContactResponse",
+      properties: %{
+        id: %Schema{type: :string},
+        owner_did: %Schema{type: :string},
+        entity_type: %Schema{type: :string, enum: ["person", "company", "agent"]},
+        contact_ref: %Schema{type: :string},
+        contact_ref_type: %Schema{type: :string},
+        contact_type_id: %Schema{type: :string, nullable: true},
+        is_emergency_contact: %Schema{type: :boolean},
+        company_name: %Schema{type: :string, nullable: true},
+        source: %Schema{type: :string, enum: ["manual", "lookup", "agent", "invite", "follow"]},
+        status: %Schema{type: :string, enum: ["active", "pending", "removed"]},
+        created_at: %Schema{type: :integer},
+        updated_at: %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp contacts_list_response_schema do
+    %Schema{
+      type: :object, title: "ContactsListResponse",
+      properties: %{
+        contacts: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count: %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp contact_types_response_schema do
+    %Schema{
+      type: :object, title: "ContactTypesResponse",
+      properties: %{
+        contact_types: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}}
+      }
+    }
+  end
+
+  defp lookup_response_schema do
+    %Schema{
+      type: :object, title: "LookupResponse",
+      properties: %{
+        did: %Schema{type: :string},
+        found: %Schema{type: :boolean}
+      }
+    }
+  end
+
+  defp suggestions_response_schema do
+    %Schema{
+      type: :object, title: "SuggestionsResponse",
+      properties: %{
+        suggestions: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count: %Schema{type: :integer}
+      }
+    }
+  end
+
+  defp add_member_from_contact_request_schema do
+    %Schema{
+      type: :object, title: "AddMemberFromContactRequest",
+      required: [:contact_id],
+      properties: %{
+        contact_id: %Schema{type: :string}
+      }
+    }
+  end
+
+  # ===========================================================================
+  # Schemas — People (person-to-person follow — NOT in IMPLEMENTATION_GUIDE.md)
+  # ===========================================================================
+
+  defp follow_person_request_schema do
+    %Schema{
+      type: :object, title: "FollowPersonRequest",
+      properties: %{}
+    }
+  end
+
+  defp person_follow_response_schema do
+    %Schema{
+      type: :object, title: "PersonFollowResponse",
+      properties: %{
+        status: %Schema{type: :string, enum: ["active", "pending", "denied"]},
+        target_did: %Schema{type: :string, nullable: true},
+        follower_did: %Schema{type: :string, nullable: true}
+      }
+    }
+  end
+
+  defp pending_follows_response_schema do
+    %Schema{
+      type: :object, title: "PendingFollowsResponse",
+      properties: %{
+        pending: %Schema{type: :array, items: %Schema{type: :object, additionalProperties: true}},
+        count: %Schema{type: :integer}
+      }
+    }
+  end
+
   defp error_response_schema do
     %Schema{
       type: :object, title: "ErrorResponse",
@@ -1367,6 +1689,22 @@ defmodule PRZMAWeb.ApiSpec do
   defp op_circles_body_with_path(summary, op_id, desc, path_param, schema_name, responses) do
     %OpenApiSpex.Operation{
       summary: summary, tags: ["Circles"], operationId: op_id,
+      description: desc, security: [%{"BearerAuth" => []}],
+      parameters: [
+        %OpenApiSpex.Parameter{name: path_param, in: :path, required: true, schema: %Schema{type: :string}}
+      ],
+      requestBody: OpenApiSpex.Operation.request_body(
+        "Request body", "application/json",
+        %Reference{"$ref": "#/components/schemas/#{schema_name}"},
+        required: true
+      ),
+      responses: responses
+    }
+  end
+
+  defp op_people_body_with_path(summary, op_id, desc, path_param, schema_name, responses) do
+    %OpenApiSpex.Operation{
+      summary: summary, tags: ["People"], operationId: op_id,
       description: desc, security: [%{"BearerAuth" => []}],
       parameters: [
         %OpenApiSpex.Parameter{name: path_param, in: :path, required: true, schema: %Schema{type: :string}}
