@@ -95,7 +95,8 @@ defmodule PRZMAWeb.CircleController do
         "id" => params["id"] || "msg_#{circle_id}_#{System.os_time(:microsecond)}",
         "did" => did, "actor" => did, "activity_type" => "Message",
         "space" => "circle:#{circle_id}", "to" => to_list, "raw_json" => raw_json,
-        "object_cas" => params["object_cas"], "object_name" => params["object_name"]
+        "object_cas" => params["object_cas"], "object_name" => params["object_name"],
+        "user_type" => params["user_type"] || "person"
       }
       case ActivitySync.publish(activity) do
         {:ok, %{outbox_version: v}} ->

@@ -535,7 +535,8 @@ defmodule PRZMA.Social.CircleSync do
       "id" => "#{activity_type}_#{circle_id}_#{member_did}_#{System.os_time(:microsecond)}",
       "did" => owner_did, "actor" => member_did, "activity_type" => activity_type,
       "space" => "circle:#{circle_id}", "to" => [owner_did],
-      "raw_json" => Jason.encode!(%{circle_id: circle_id, member_did: member_did})
+      "raw_json" => Jason.encode!(%{circle_id: circle_id, member_did: member_did}),
+      "user_type" => "person"
     })
   end
 

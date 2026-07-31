@@ -1438,7 +1438,9 @@ defmodule PRZMAWeb.ApiSpec do
       required: [:raw_json],
       properties: %{
         id: %Schema{type: :string, nullable: true},
-        raw_json: %Schema{type: :string, example: ~s({"type":"Note","content":"hi all"})}
+        raw_json: %Schema{type: :string, example: ~s({"type":"Note","content":"hi all"})},
+        user_type: %Schema{type: :string, enum: ["person", "agent"], default: "person",
+          description: "Required by the underlying activity/outbox schema. Defaults to \"person\" if omitted."}
       }
     }
   end
