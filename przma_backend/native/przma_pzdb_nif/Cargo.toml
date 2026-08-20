@@ -18,6 +18,7 @@ lancedb      = "0.9"
 arrow-array  = "=52.2.0"
 arrow-schema = "=52.2.0"
 arrow-json   = "=52.2.0"
+chrono = "=0.4.31"
 
 # If `mix compile` dies inside the `lance` crate with a type-recursion / overflow
 # error (the one you hit before), switch to:
