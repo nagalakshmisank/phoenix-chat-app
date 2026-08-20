@@ -7,23 +7,26 @@ edition = "2021"
 name       = "przma_pzdb_nif"
 crate-type = ["cdylib"]
 
-# Versions pinned to match your PROVEN przma-files build (workspace Cargo.toml).
-# These three arrow crates MUST share the exact same version as lancedb expects.
+# Updated for the chrono/arrow resolver conflict: lancedb 0.9 required
+# chrono >= 0.4.35, which is unsatisfiable under an exact chrono pin below
+# that line. lancedb 0.10 + arrow 53 resolves the underlying chrono/arrow
+# `quarter()` naming collision upstream, so no pin workaround is needed.
 [dependencies]
 rustler      = "0.36"
 serde_json   = "1"
 tokio        = { version = "1", features = ["full"] }
 futures      = "0.3"
-lancedb      = "0.9"
-arrow-array  = "=52.2.0"
-arrow-schema = "=52.2.0"
-arrow-json   = "=52.2.0"
-chrono = "=0.4.31"
+lancedb      = "0.10"
+arrow-array  = "=53.0.0"
+arrow-schema = "=53.0.0"
+arrow-json   = "=53.0.0"
+chrono       = "0.4"
 
-# If `mix compile` dies inside the `lance` crate with a type-recursion / overflow
-# error (the one you hit before), switch to:
-#   lancedb = "0.10"   and   arrow-array/arrow-schema/arrow-json = "53"
-# The connect/open_table/add/query API used in lib.rs is identical across them.
+# If `mix compile` dies inside the `lance` crate with a type-recursion /
+# overflow error, that's a separate known issue unrelated to this chrono
+# fix — it stems from `lance`'s macro-generated type depth, not from
+# version resolution. Raising rustc's recursion limit or checking for a
+# newer `lance`/`lancedb` patch is the next step, not re-pinning versions.
 
 # Do NOT add `panic = "abort"` — it stops Rustler from catching NIF panics and a
 # panic would take down the whole BEAM instead of raising an Elixir error.
