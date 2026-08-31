@@ -15,7 +15,7 @@ defmodule Przma.MixProject do
   def application do
     [
       mod: {Przma.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      extra_applications: [:logger, :runtime_tools, :inets, :ssl]
     ]
   end
 

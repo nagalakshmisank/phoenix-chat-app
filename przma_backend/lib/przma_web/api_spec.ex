@@ -51,7 +51,7 @@ defmodule PRZMAWeb.ApiSpec do
         """
       },
       servers: [
-        %Server{url: "http://localhost:4200", description: "Local dev (mix phx.server)"}
+        %Server{url: "http://172.235.18.126:4201", description: "Local dev (mix phx.server)"}
       ],
       paths: %{
         "/api/v1/registration/complete" => %OpenApiSpex.PathItem{
