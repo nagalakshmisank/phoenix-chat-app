@@ -1,6 +1,10 @@
 defmodule PRZMAWeb.Router do
   use PRZMAWeb, :router
 
+  pipeline :graphql_context do
+    plug PRZMAWeb.Graphql.Context
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
   end
@@ -34,5 +38,17 @@ defmodule PRZMAWeb.Router do
     post "/profile", ProfileController, :create
     get "/profile", ProfileController, :show
     patch "/profile", ProfileController, :update
+  end
+
+  scope "/api/graphql" do
+    pipe_through [:api, :require_did_auth, :graphql_context]
+    forward "/", Absinthe.Plug, schema: PRZMAWeb.Graphql.Schema
+  end
+
+  if Mix.env() == :dev do
+    scope "/graphiql" do
+      pipe_through [:api, :require_did_auth, :graphql_context]
+      forward "/", Absinthe.Plug.GraphiQL, schema: PRZMAWeb.Graphql.Schema, interface: :playground
+    end
   end
 end

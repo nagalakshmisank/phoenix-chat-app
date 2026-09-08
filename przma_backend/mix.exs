@@ -44,7 +44,9 @@ defmodule Przma.MixProject do
       # project's PRZMAWeb.ApiSpec, scoped to this project's 4 real
       # endpoints). Ships its own SwaggerUI assets — no CDN dependency,
       # unlike the version this replaces.
-      {:open_api_spex, "~> 3.18"}
+      {:open_api_spex, "~> 3.18"},
+      {:absinthe, "~> 1.7"},
+      {:absinthe_plug, "~> 1.5"}
     ]
   end
 end
