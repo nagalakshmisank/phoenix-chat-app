@@ -1,58 +1,130 @@
 defmodule PRZMAWeb.Router do
   use PRZMAWeb, :router
 
+  # ------------------------------------------------------------
+  # GraphQL Context
+  # ------------------------------------------------------------
   pipeline :graphql_context do
     plug PRZMAWeb.Graphql.Context
   end
 
+  # ------------------------------------------------------------
+  # GraphiQL Page Authentication
+  # ------------------------------------------------------------
   pipeline :graphiql_page_auth do
     plug PRZMAWeb.Plugs.GraphiqlPageAuth
   end
 
+  # ------------------------------------------------------------
+  # API
+  # ------------------------------------------------------------
   pipeline :api do
     plug :accepts, ["json"]
   end
 
+  # ------------------------------------------------------------
+  # Keycloak Authentication
+  # ------------------------------------------------------------
   pipeline :require_did_auth do
     plug PRZMAWeb.Plugs.KeycloakAuth
   end
 
-  # Same pattern as the real project's router.ex — PutApiSpec loads
-  # PRZMAWeb.ApiSpec, then /api/openapi renders it as JSON and
-  # /swaggerui renders the interactive page against that JSON.
+  # ------------------------------------------------------------
+  # OpenAPI
+  # ------------------------------------------------------------
   pipeline :openapi do
-    plug OpenApiSpex.Plug.PutApiSpec, module: PRZMAWeb.ApiSpec
+    plug OpenApiSpex.Plug.PutApiSpec,
+      module: PRZMAWeb.ApiSpec
   end
 
+  # ------------------------------------------------------------
+  # OpenAPI JSON
+  # ------------------------------------------------------------
   scope "/api/openapi" do
     pipe_through :openapi
-    get "/", OpenApiSpex.Plug.RenderSpec, []
+
+    get "/",
+      OpenApiSpex.Plug.RenderSpec,
+      []
   end
 
+  # ------------------------------------------------------------
+  # Swagger UI
+  # ------------------------------------------------------------
   scope "/swaggerui" do
     pipe_through :openapi
-    get "/", OpenApiSpex.Plug.SwaggerUI, path: "/api/openapi"
+
+    get "/",
+      OpenApiSpex.Plug.SwaggerUI,
+      path: "/api/openapi"
   end
 
+  # ------------------------------------------------------------
+  # REST API v1
+  # ------------------------------------------------------------
   scope "/api/v1", PRZMAWeb do
-    pipe_through [:api, :require_did_auth]
+    pipe_through [
+      :api,
+      :require_did_auth
+    ]
 
-    post "/registration/complete", RegistrationController, :complete
+    # Registration
+    post "/registration/complete",
+         RegistrationController,
+         :complete
 
-    post "/profile", ProfileController, :create
-    get "/profile", ProfileController, :show
-    patch "/profile", ProfileController, :update
+    # Profile
+    post "/profile",
+         ProfileController,
+         :create
+
+    get "/profile",
+        ProfileController,
+        :show
+
+    patch "/profile",
+          ProfileController,
+          :update
   end
 
+  # ------------------------------------------------------------
+  # GraphQL / GraphiQL
+  # ------------------------------------------------------------
+  #
+  # Request flow:
+  #
+  # Client
+  #   ↓
+  # :api
+  #   ↓
+  # :graphiql_page_auth
+  #   ↓
+  # :require_did_auth
+  #   ↓
+  # KeycloakAuth
+  #   ↓
+  # conn.assigns.did
+  # conn.assigns.tenant_uuid
+  # conn.assigns.roles
+  #   ↓
+  # :graphql_context
+  #   ↓
+  # Absinthe context
+  #   ↓
+  # GraphQL Resolver
+  #
+  # ------------------------------------------------------------
   scope "/graphiql" do
-    pipe_through [:api, :graphiql_page_auth, :graphql_context]
-    forward "/", Absinthe.Plug.GraphiQL, schema: PRZMAWeb.Graphql.Schema, interface: :playground
-  end
+    pipe_through [
+      :api,
+      :graphiql_page_auth,
+      :require_did_auth,
+      :graphql_context
+    ]
 
-  if Mix.env() == :dev do
-    scope "/graphiql" do
-      pipe_through [:api]
-      forward "/", Absinthe.Plug.GraphiQL, schema: PRZMAWeb.Graphql.Schema, interface: :playground, default_url: "/api/graphql"
-    end
+    forward "/",
+      Absinthe.Plug.GraphiQL,
+      schema: PRZMAWeb.Graphql.Schema,
+      interface: :playground
   end
 end
