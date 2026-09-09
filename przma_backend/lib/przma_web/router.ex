@@ -48,7 +48,7 @@ defmodule PRZMAWeb.Router do
   if Mix.env() == :dev do
     scope "/graphiql" do
       pipe_through [:api]
-      forward "/", Absinthe.Plug.GraphiQL, schema: PRZMAWeb.Graphql.Schema, interface: :playground, url: "/api/graphql"
+      forward "/", Absinthe.Plug.GraphiQL, schema: PRZMAWeb.Graphql.Schema, interface: :playground, default_url: "/api/graphql"
     end
   end
 end
