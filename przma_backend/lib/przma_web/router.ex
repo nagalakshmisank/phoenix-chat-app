@@ -114,11 +114,16 @@ defmodule PRZMAWeb.Router do
   # GraphQL Resolver
   #
   # ------------------------------------------------------------
+
+  scope "/api/graphql" do
+    pipe_through [:api, :require_did_auth, :graphql_context]
+    forward "/", Absinthe.Plug, schema: PRZMAWeb.Graphql.Schema
+  end
+
   scope "/graphiql" do
     pipe_through [
       :api,
       :graphiql_page_auth,
-      :require_did_auth,
       :graphql_context
     ]
 
