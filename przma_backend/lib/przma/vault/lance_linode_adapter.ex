@@ -4,35 +4,24 @@ defmodule Przma.Vault.LanceLinodeAdapter do
   found in the mentor's other repo (phoenix-chat-app-circle) at
   native/przma_pzdb_nif/src/lib.rs, with matching Elixir wrapper
   lib/przma/pzdb/{nif,pzdb}.ex, copied verbatim into this project.
-  Replaces the earlier ExAws-JSON placeholder — this now calls real
-  LanceDB write/read via PRZMA.PzDb.
 
-  TWO REAL ARCHITECTURAL DECISIONS THIS FILE MAKES — flag both with
-  your supervisor, not just take them on my say-so:
+  ARCHITECTURAL DECISION, now resolved (was previously an open
+  question flagged in this moduledoc — space defaulted to "core"):
 
-  1. NO tenant_uuid IN THE PHYSICAL PATH. PRZMA.PzDb.resolve/1's real,
-     confirmed-working URI shape is
-       pzdb://{did}/{service}/{space}/{table}/{record_id}
-     — four segments, and tenant_uuid is NOT one of them anywhere in
-     that code. Every S3 path shown earlier in this project's design
-     (e.g. "{tenant_uuid}/{did}/vault/profile.lance/") does NOT match
-     what the real NIF actually produces. This adapter drops
-     tenant_id from the PHYSICAL path to match reality — tenant_uuid
-     still flows through PzdbAuthorization and gets stamped into the
-     row itself (`gid` field, see profile.ex) for app-level bookkeeping,
-     it just isn't part of where the file lands in S3.
+  NO tenant_uuid IN THE PHYSICAL PATH. PRZMA.PzDb.resolve/1's real,
+  confirmed-working URI shape is
+    pzdb://{did}/{service}/{space}/{table}/{record_id}
+  — four segments, tenant_uuid is not one of them. tenant_uuid still
+  flows through PzdbAuthorization and gets stamped into the row itself
+  (`gid` field, see profile.ex) for app-level bookkeeping — it just
+  isn't part of where the file lands in S3.
 
-  2. "space" DEFAULTS TO "core". The real URI has a 4th segment
-     ("space") this project's PzdbUri struct has no equivalent field
-     for — our `namespace` (vault/public/professional) maps onto the
-     real system's "service" position, not "space". Rather than
-     invent a value with no basis, every write here defaults space to
-     "core" (the value used in the real pzdb.ex's own example comment)
-     until your team decides whether personas/circles need a real
-     second axis here.
+  "space" now comes from PzdbUri.t()'s real `space` field (one of
+  "private" | "public" | "personal") instead of a hardcoded "core" —
+  every namespace/service gets these 3 physical sub-partitions.
 
-  Resulting real S3 path, e.g. keerthi's profile:
-     s3://perkeep/did_przma_keerthi/vault/core/profile.lance
+  Resulting real S3 path, e.g. kc_user1's profile (private space):
+     s3://perkeep/did_przma_kc_user1/vault/private/profile.lance
   """
 
   @behaviour Przma.Vault.NifAdapter
@@ -90,10 +79,10 @@ defmodule Przma.Vault.LanceLinodeAdapter do
 
   # -- internal --------------------------------------------------------
 
-  # Our PzdbUri -> real pzdb://{did}/{service}/{space}/{table} — see
-  # moduledoc for why tenant_id is dropped and space is "core".
-  defp to_real_pzdb_uri(%PzdbUri{did: did, namespace: service, table: table}) do
-    "pzdb://#{did}/#{service}/core/#{table}"
+  # Our PzdbUri -> real pzdb://{did}/{service}/{space}/{table}.
+  # tenant_id dropped per moduledoc; space now real, not "core".
+  defp to_real_pzdb_uri(%PzdbUri{did: did, namespace: service, space: space, table: table}) do
+    "pzdb://#{did}/#{service}/#{space}/#{table}"
   end
 
   defp stringify_keys(row) when is_map(row) do
