@@ -46,6 +46,16 @@ defmodule Przma.Vault.NifAdapter do
   @doc "Query, optionally with an SQL predicate (QueryBase::only_if) and/or vector search."
   @callback query(PzdbUri.t(), opts :: keyword()) :: {:ok, arrow_ipc_binary()} | {:error, term()}
 
+  @doc """
+  Query ALL rows matching this URI's did — a `did` COLUMN filter, not
+  `id`, and no limit. Separate from query/2 on purpose: query/2 is
+  built for one-row-per-did tables (profile) and is relied on,
+  unchanged, by existing code; this is for many-rows-per-did tables
+  (files, and future chat/calendar/AI) where each row has its own
+  distinct id and `did` only identifies the OWNER, not the row.
+  """
+  @callback query_many(PzdbUri.t()) :: {:ok, arrow_ipc_binary()} | {:error, term()}
+  
   @doc "Cursor-based sync query — rows with updated_at after `since`, per the confirmed timestamp-cursor sync design (Lance has no row-level version-diff API)."
   @callback query_since(PzdbUri.t(), since :: DateTime.t()) :: {:ok, arrow_ipc_binary()} | {:error, term()}
 

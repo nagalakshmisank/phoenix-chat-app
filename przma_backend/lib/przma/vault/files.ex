@@ -79,7 +79,7 @@ defmodule Przma.Vault.Files do
     owner_did = Keyword.get(opts, :owner_did, actor_did)
     space = Keyword.get(opts, :space, @default_space)
     uri = build_pzdb_uri(tenant_uuid, owner_did, space)
-    PzdbConnector.read(actor, PzdbUri.to_string(uri))
+    PzdbConnector.read_many(actor, PzdbUri.to_string(uri))
   end
 
   @doc """

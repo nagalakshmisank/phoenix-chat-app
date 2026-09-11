@@ -31,6 +31,19 @@ defmodule Przma.Vault.PzdbConnector do
     end
   end
 
+  @doc """
+  Reads ALL rows belonging to this URI's did — for many-rows-per-did
+  tables (files, and future chat/calendar/AI). Same authorization
+  chain as read/3, only the final NifAdapter callback differs.
+  """
+  @spec read_many(actor(), uri_string :: String.t()) :: {:ok, binary()} | {:error, term()}
+  def read_many(actor, uri_string) do
+    with {:ok, uri} <- PzdbUri.parse(uri_string),
+        :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
+      NifAdapter.adapter().query_many(uri)
+    end
+  end
+
   @spec write(actor(), uri_string :: String.t(), rows :: [map()] | binary()) ::
           :ok | {:error, term()}
   def write(actor, uri_string, rows) do
