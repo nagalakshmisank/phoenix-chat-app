@@ -8,17 +8,12 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
   download; not built in this pass — flagging so it isn't mistaken
   for an oversight.
 
-  KNOWN LIMITATION, not fixable from this file alone: `list/2` calls
-  Przma.Vault.Files.list_recent/3, which goes through
-  LanceLinodeAdapter.query/2 — that function hardcodes a
-  `filter: "id = '#{did}'", limit: 1` query, built for one-row-per-did
-  tables like profile. The files/index table has MANY rows per did
-  (one per uploaded file, each with its own generated id, NOT the
-  did) — so this query, as currently written, will not correctly find
-  them. This needs the adapter extended with a real "many rows,
-  filtered by a did COLUMN, not by id" query capability before listing
-  actually returns real results. Confirm with whoever owns lib.rs
-  before relying on `list` for anything beyond a single test file.
+  `list/2` calls Przma.Vault.Files.list_recent/3, which goes through
+  PzdbConnector.read_many/2 -> LanceLinodeAdapter.query_many/1 (a
+  `did` COLUMN filter, no limit) instead of the old single-record
+  query/2 path — this is the fix for files having many rows per did,
+  each with its own generated id, unlike profile's one row per did.
+  query/2 itself (used by profile.ex) is untouched by this.
   """
 
   alias Przma.Vault.Files
