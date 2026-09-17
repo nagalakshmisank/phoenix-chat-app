@@ -50,7 +50,9 @@ defmodule Przma.MixProject do
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},
-      {:hackney, "~> 1.20"}
+      {:hackney, "~> 1.20"},
+      {:ecto_sql, "~> 3.11"},
+      {:postgrex, ">= 0.0.0"}
     ]
   end
 end

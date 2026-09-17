@@ -10,7 +10,8 @@ defmodule Przma.Application do
       # JWKS cache for KeycloakAuth — fetches Keycloak's signing key
       # once at boot, caches it, refetches on a verify failure (key
       # rotation). See lib/przma/auth/jwks_cache.ex.
-      Przma.Auth.JwksCache
+      Przma.Auth.JwksCache,
+      Przma.CommonsCas.Repo
     ]
 
     opts = [strategy: :one_for_one, name: Przma.Supervisor]

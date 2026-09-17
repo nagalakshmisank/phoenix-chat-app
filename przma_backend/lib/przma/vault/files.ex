@@ -61,7 +61,8 @@ defmodule Przma.Vault.Files do
     uri = build_pzdb_uri(tenant_uuid, owner_did, space)
 
     with {:ok, content_cas} <- Cas.put(actor, uri, bytes) do
-      record_cas_meta(actor, tenant_uuid, owner_did, content_cas, byte_size(bytes), space)
+      ref_count = record_cas_meta(actor, tenant_uuid, owner_did, content_cas, byte_size(bytes), space)
+      maybe_replicate_to_commons(owner_did, actor.did, content_cas, metadata, byte_size(bytes), ref_count, space, uri)
 
       row_id = generate_file_id()
 
@@ -208,19 +209,45 @@ defmodule Przma.Vault.Files do
   # around itself for the same reason.
   defp record_cas_meta(actor, tenant_uuid, owner_did, content_cas, size_bytes, space) do
     case CasMeta.record(actor, tenant_uuid, owner_did, content_cas, size_bytes, space) do
-      {:ok, _ref_count} ->
-        :ok
+      {:ok, ref_count} ->
+        ref_count
 
       {:error, reason} ->
         Logger.warning(
           "[Przma.Vault.Files] cas_meta record failed did=#{owner_did} hash=#{content_cas} reason=#{inspect(reason)}"
-        )
+      )
 
-        :ok
+      1
     end
   rescue
     e ->
       Logger.warning("[Przma.Vault.Files] cas_meta record error #{inspect(e)}")
+      1
+  end
+
+  defp maybe_replicate_to_commons(_owner_did, _created_by, _content_cas, _metadata, _size_bytes, _ref_count, space, _uri)
+      when space != "public" do
+    :ok
+  end
+
+  defp maybe_replicate_to_commons(owner_did, created_by, content_cas, metadata, size_bytes, ref_count, "public", uri) do
+    s3_uri = internal_s3_uri_for(uri, content_cas)
+    mime_type = metadata[:content_type] || "application/octet-stream"
+
+    Przma.CommonsCas.Replicator.replicate(owner_did, created_by, content_cas, mime_type, size_bytes, ref_count, s3_uri)
+  rescue
+    e ->
+      Logger.warning("[Przma.Vault.Files] commons replication error #{inspect(e)}")
       :ok
+  end
+
+# Mirrors Cas's own cas_key/2 shape — duplicated here rather than
+# reaching into Cas's private function. If Cas's key format ever
+# changes, update this alongside it.
+  defp internal_s3_uri_for(%PzdbUri{did: did, namespace: namespace}, digest) do
+    shard = String.slice(digest, 0, 2)
+    sanitized_did = String.replace(did, [":", " "], "_")
+    bucket = Application.get_env(:przma, :vault) |> Keyword.get(:s3_bucket)
+    "s3://#{bucket}/#{sanitized_did}/#{namespace}/cas/#{shard}/#{digest}"
   end
 end
