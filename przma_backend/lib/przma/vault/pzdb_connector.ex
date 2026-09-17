@@ -44,6 +44,22 @@ defmodule Przma.Vault.PzdbConnector do
     end
   end
 
+  @doc """
+  Reads ONE row by its `id` COLUMN — distinct from read/3 (which is
+  hardcoded to filter by `did` and only fits one-row-per-did tables
+  like profile). For tables such as cas_meta, whose row id is a
+  content hash unrelated to `did`. Same authorization chain as
+  read/3, only the final NifAdapter callback differs.
+  """
+  @spec read_by_id(actor(), uri_string :: String.t(), id :: String.t()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_by_id(actor, uri_string, id) do
+    with {:ok, uri} <- PzdbUri.parse(uri_string),
+         :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
+      NifAdapter.adapter().get_by_id(uri, id)
+    end
+  end
+
   @spec write(actor(), uri_string :: String.t(), rows :: [map()] | binary()) ::
           :ok | {:error, term()}
   def write(actor, uri_string, rows) do

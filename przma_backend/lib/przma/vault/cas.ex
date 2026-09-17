@@ -68,6 +68,29 @@ defmodule Przma.Vault.Cas do
     end
   end
 
+  @doc """
+  Authorizes actor against `uri` for :read, THEN returns a short-lived
+  presigned GET URL for the blob instead of the bytes themselves — the
+  GraphQL-native shape for the old REST `download_blob` endpoint (see
+  FilesResolver.blob_download_url/2). GraphQL responses are JSON;
+  streaming bytes through a resolver would mean base64-encoding them
+  inline, a poor fit beyond small files, so the client fetches
+  straight from S3 with this URL instead.
+  """
+  @spec presigned_get_url(actor :: map(), uri :: PzdbUri.t(), digest :: String.t(), opts :: keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def presigned_get_url(actor, %PzdbUri{} = uri, digest, opts \\ []) do
+    with :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
+      expires_in = Keyword.get(opts, :expires_in, 300)
+      config = ExAws.Config.new(:s3, s3_opts())
+
+      case ExAws.S3.presigned_url(config, :get, bucket(), cas_key(uri, digest), expires_in: expires_in) do
+        {:ok, url} -> {:ok, url}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   # {did}/{namespace}/cas/{shard}/{hash} — namespace comes from the
   # URI (whatever it is: "files", or any future namespace with its
   # own CAS needs), never hardcoded. `space` is intentionally NOT part

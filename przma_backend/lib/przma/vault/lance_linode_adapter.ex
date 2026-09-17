@@ -79,6 +79,18 @@ defmodule Przma.Vault.LanceLinodeAdapter do
   end
 
   @impl true
+  def get_by_id(%PzdbUri{} = uri, id) do
+    real_uri = to_real_pzdb_uri(uri)
+
+    case PRZMA.PzDb.query(real_uri, filter: "id = '#{escape(id)}'", limit: 1) do
+      {:ok, %{"records" => [record | _]}} -> {:ok, Jason.encode!(record)}
+      {:ok, %{"records" => []}} -> {:error, :not_found}
+      {:ok, _other} -> {:error, :not_found}
+      {:error, _} = err -> err
+    end
+  end
+
+  @impl true
   def query_since(%PzdbUri{} = _uri, _since), do: {:error, :not_implemented}
 
   @impl true

@@ -55,7 +55,17 @@ defmodule Przma.Vault.NifAdapter do
   distinct id and `did` only identifies the OWNER, not the row.
   """
   @callback query_many(PzdbUri.t()) :: {:ok, arrow_ipc_binary()} | {:error, term()}
-  
+
+  @doc """
+  Fetch a single row by its `id` COLUMN (an arbitrary caller-supplied
+  id, NOT the URI's `did`). Separate from query/2, which hardcodes an
+  `id = '{did}'` filter for one-row-per-did tables like profile —
+  this is for tables like cas_meta where `id` is a content hash and
+  has nothing to do with `did`.
+  """
+  @callback get_by_id(PzdbUri.t(), id :: String.t()) ::
+              {:ok, arrow_ipc_binary()} | {:error, :not_found | term()}
+
   @doc "Cursor-based sync query — rows with updated_at after `since`, per the confirmed timestamp-cursor sync design (Lance has no row-level version-diff API)."
   @callback query_since(PzdbUri.t(), since :: DateTime.t()) :: {:ok, arrow_ipc_binary()} | {:error, term()}
 
