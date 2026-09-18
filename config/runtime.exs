@@ -23,6 +23,18 @@ end
 config :chat_app, ChatAppWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# Przma.CommonsCas.Repo — moved OUTSIDE the `if config_env() == :prod`
+# guard below on purpose. This must load in every environment (dev,
+# test, prod), since it's being tested live via `mix phx.server` in
+# dev right now, not just in a prod release.
+config :przma, Przma.CommonsCas.Repo,
+  hostname: System.get_env("COMMONS_CAS_HOST", "172.235.18.126"),
+  port: String.to_integer(System.get_env("COMMONS_CAS_PORT", "5432")),
+  database: System.get_env("COMMONS_CAS_DB", "przma_commons_cas"),
+  username: System.get_env("COMMONS_CAS_USER", "przma_commons"),
+  password: System.get_env("COMMONS_CAS_PASSWORD", "PrzmaCommons@2026#Secure"),
+  pool_size: 5
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
@@ -40,14 +52,6 @@ if config_env() == :prod do
     # For machines with several cores, consider starting multiple pools of `pool_size`
     # pool_count: 4,
     socket_options: maybe_ipv6
-
-  config :przma, Przma.CommonsCas.Repo,
-    hostname: System.get_env("COMMONS_CAS_HOST", "172.235.18.126"),
-    port: String.to_integer(System.get_env("COMMONS_CAS_PORT", "5432")),
-    database: System.get_env("COMMONS_CAS_DB", "przma_commons_cas"),
-    username: System.get_env("COMMONS_CAS_USER", "przma_commons"),
-    password: System.get_env("COMMONS_CAS_PASSWORD", "PrzmaCommons@2026#Secure"),
-    pool_size: 5
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
