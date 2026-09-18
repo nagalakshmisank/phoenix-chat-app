@@ -28,3 +28,15 @@ config :przma, :vault,
 # the real pzdb.ex/nif.ex were found). Both are set from the same env
 # var so nothing breaks; PzDb only reads this one.
 config :przma, :vault_base_path, System.get_env("VAULT_BASE_PATH", "s3://perkeep")
+
+# Przma.CommonsCas.Repo — the centralized Postgres database for
+# cross-tenant CAS analytics (przma_commons_cas). The one deliberate
+# exception to this project's "no Postgres" decision, isolated to
+# analytics only — never a source of truth for authorization.
+config :przma, Przma.CommonsCas.Repo,
+  hostname: System.get_env("COMMONS_CAS_HOST", "172.235.18.126"),
+  port: String.to_integer(System.get_env("COMMONS_CAS_PORT", "5432")),
+  database: System.get_env("COMMONS_CAS_DB", "przma_commons_cas"),
+  username: System.get_env("COMMONS_CAS_USER", "przma_commons"),
+  password: System.get_env("COMMONS_CAS_PASSWORD", "PrzmaCommons@2026#Secure"),
+  pool_size: 5
