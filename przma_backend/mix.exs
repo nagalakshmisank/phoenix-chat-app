@@ -52,7 +52,8 @@ defmodule Przma.MixProject do
       {:sweet_xml, "~> 0.7"},
       {:hackney, "~> 1.20"},
       {:ecto_sql, "~> 3.11"},
-      {:postgrex, ">= 0.0.0"}
+      {:postgrex, ">= 0.0.0"},
+      {:cowlib, "~> 2.13.0", override: true}
     ]
   end
 end
