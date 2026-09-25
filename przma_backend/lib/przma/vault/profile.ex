@@ -1,21 +1,20 @@
 defmodule Przma.Vault.Profile do
   @moduledoc """
-  User profile — one row, its own Lance table, in the "private" space
-  of the "vault" namespace. "vault" is now an ordinary namespace like
-  any other (ceiling: [:read, :write], vault_scope: :private) — the
-  absolute owner-only guarantee comes from the SPACE ("private" here),
-  not from the namespace name. If profile should be truly ungrantable
-  rather than merely private-by-default, use space: "personal" instead
-  (see NamespacePolicy.personal_space?/1) — "private" is grantable in
-  principle, once live_grant_for/2 is implemented.
+  User profile — namespace "vault", space "private", table "profile".
 
-  Physical path via PRZMA.PzDb: pzdb://{did}/vault/private/profile —
-  see lance_linode_adapter.ex for the real S3 shape.
+      pzdb://s3/{tenant_uuid}/{did}/vault/private/profile
 
-  `id` is set equal to `did` — the real pzdb_upsert NIF deletes by
-  `id` before inserting (its upsert strategy), so every table's rows
-  need an `id`; for a one-row-per-user table like this, `did` IS the
-  natural id.
+  Every call goes through PzdbConnector (parse -> NamespacePolicy ->
+  PzdbAuthorization -> BackendRouter). BackendRouter sends vault/profile
+  to DocStoreAdapter, which stores:
+
+      CouchDB  przma_did_… / vault:private:profile   (the profile fields)
+      S3       did_…/vault/private/profile.couch.json (read-only JSON mirror)
+
+  This replaces profile.lance for NEW writes. Lance code is untouched.
+
+  `id` is set to `did` — one profile per user. `id` and `tier` are
+  bookkeeping and are never stored as profile fields.
   """
 
   alias Przma.Vault.{PzdbConnector, PzdbUri}
@@ -24,14 +23,9 @@ defmodule Przma.Vault.Profile do
   @space "private"
   @table "profile"
 
-  @type attrs :: %{
-          optional(:gid) => String.t(),
-          optional(:email) => String.t(),
-          optional(:nickname) => String.t()
-        }
+  @type attrs :: %{optional(atom() | String.t()) => term()}
 
-  @spec create(actor :: PzdbConnector.actor(), tenant_uuid :: String.t(), attrs()) ::
-          :ok | {:error, term()}
+  @spec create(PzdbConnector.actor(), String.t(), attrs()) :: :ok | {:error, term()}
   def create(%{did: did} = actor, tenant_uuid, attrs) do
     row =
       Map.merge(attrs, %{
@@ -41,17 +35,17 @@ defmodule Przma.Vault.Profile do
         created_at: System.os_time(:microsecond)
       })
 
-    PzdbConnector.write(actor, build_uri(tenant_uuid, did), [row])
+    PzdbConnector.write(actor, uri(tenant_uuid, did), [row])
   end
 
-  @spec get(actor :: PzdbConnector.actor(), tenant_uuid :: String.t()) ::
-          {:ok, binary()} | {:error, term()}
+  @doc "Returns the profile content as a JSON binary."
+  @spec get(PzdbConnector.actor(), String.t()) :: {:ok, binary()} | {:error, term()}
   def get(%{did: did} = actor, tenant_uuid) do
-    PzdbConnector.read(actor, build_uri(tenant_uuid, did))
+    PzdbConnector.read(actor, uri(tenant_uuid, did))
   end
 
-  @spec update(actor :: PzdbConnector.actor(), tenant_uuid :: String.t(), attrs()) ::
-          :ok | {:error, term()}
+  @doc "Field-level update: only the given attrs change, the rest is kept."
+  @spec update(PzdbConnector.actor(), String.t(), attrs()) :: :ok | {:error, term()}
   def update(%{did: did} = actor, tenant_uuid, attrs) do
     row =
       Map.merge(attrs, %{
@@ -61,12 +55,11 @@ defmodule Przma.Vault.Profile do
         updated_at: System.os_time(:microsecond)
       })
 
-    # Real pzdb_upsert (delete-by-id then add) genuinely overwrites —
-    # unlike the earlier ExAws placeholder, this is a real upsert now.
-    PzdbConnector.upsert(actor, build_uri(tenant_uuid, did), [row], [:did])
+    PzdbConnector.upsert(actor, uri(tenant_uuid, did), [row], [:did])
   end
 
-  defp build_uri(tenant_uuid, did) do
+  @spec uri(String.t(), String.t()) :: String.t()
+  def uri(tenant_uuid, did) do
     %PzdbUri{transport: :s3, tenant_id: tenant_uuid, did: did, namespace: @namespace, space: @space, table: @table}
     |> PzdbUri.to_string()
   end

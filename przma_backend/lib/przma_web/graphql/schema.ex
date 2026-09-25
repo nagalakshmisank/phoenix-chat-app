@@ -3,9 +3,11 @@ defmodule PRZMAWeb.Graphql.Schema do
   import_types Absinthe.Plug.Types
   import_types PRZMAWeb.Graphql.Types.ProfileTypes
   import_types PRZMAWeb.Graphql.Types.FilesTypes
-  alias PRZMAWeb.Graphql.Resolvers.{ProfileResolver, FilesResolver}
+  import_types PRZMAWeb.Graphql.Types.RegistrationTypes
+  alias PRZMAWeb.Graphql.Resolvers.{ProfileResolver, FilesResolver, RegistrationResolver}
 
   query do
+    @desc "The caller's profile (vault namespace, private space)."
     field :profile, :profile do
       resolve &ProfileResolver.show/2
     end
@@ -33,14 +35,26 @@ defmodule PRZMAWeb.Graphql.Schema do
   end
 
   mutation do
+    @desc """
+    Call once right after Keycloak sign-up (safe to repeat). Creates the
+    user's CouchDB database and the profile document vault:private:profile.
+    """
+    field :complete_registration, :registration_result do
+      arg :nickname, :string
+      resolve &RegistrationResolver.complete/2
+    end
+
     field :create_profile, :profile do
+      arg :nickname, :string
       arg :display_name, :string
       arg :bio, :string
       arg :avatar_cid, :string
       resolve &ProfileResolver.create/2
     end
 
+    @desc "Field-level update — only the fields you send are changed."
     field :update_profile, :profile do
+      arg :nickname, :string
       arg :display_name, :string
       arg :bio, :string
       arg :avatar_cid, :string

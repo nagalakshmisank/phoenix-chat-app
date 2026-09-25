@@ -12,9 +12,16 @@ defmodule Przma.Vault.PzdbConnector do
   Tier-1-default project, writes call NifAdapter directly instead —
   simpler, and correct until/unless a real per-DID write-serialization
   GenServer is confirmed to exist and reintroduced deliberately.
+
+  BACKEND ROUTING (CouchDB phase): after parse + authorize, the adapter
+  comes from BackendRouter.adapter_for/1 instead of the single global
+  NifAdapter.adapter(). vault/profile goes to DocStoreAdapter
+  (CouchDB + S3 JSON mirror); everything else still goes
+  to the Lance adapter, unchanged. Authorization runs identically for
+  both — no backend is reachable without passing it first.
   """
 
-  alias Przma.Vault.{NifAdapter, PzdbAuthorization, PzdbUri}
+  alias Przma.Vault.{BackendRouter, PzdbAuthorization, PzdbUri}
 
   @type actor :: %{
           did: String.t(),
@@ -27,7 +34,7 @@ defmodule Przma.Vault.PzdbConnector do
   def read(actor, uri_string, opts \\ []) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
          :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
-      NifAdapter.adapter().query(uri, opts)
+      BackendRouter.adapter_for(uri).query(uri, opts)
     end
   end
 
@@ -40,7 +47,7 @@ defmodule Przma.Vault.PzdbConnector do
   def read_many(actor, uri_string) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
         :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
-      NifAdapter.adapter().query_many(uri)
+      BackendRouter.adapter_for(uri).query_many(uri)
     end
   end
 
@@ -56,7 +63,7 @@ defmodule Przma.Vault.PzdbConnector do
   def read_by_id(actor, uri_string, id) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
          :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
-      NifAdapter.adapter().get_by_id(uri, id)
+      BackendRouter.adapter_for(uri).get_by_id(uri, id)
     end
   end
 
@@ -65,7 +72,7 @@ defmodule Przma.Vault.PzdbConnector do
   def write(actor, uri_string, rows) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
          :ok <- PzdbAuthorization.authorize(actor, uri, :write) do
-      NifAdapter.adapter().insert(uri, rows)
+      BackendRouter.adapter_for(uri).insert(uri, rows)
     end
   end
 
@@ -74,7 +81,7 @@ defmodule Przma.Vault.PzdbConnector do
   def upsert(actor, uri_string, rows, on) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
          :ok <- PzdbAuthorization.authorize(actor, uri, :write) do
-      NifAdapter.adapter().merge_insert(uri, rows, on)
+      BackendRouter.adapter_for(uri).merge_insert(uri, rows, on)
     end
   end
 
@@ -82,7 +89,7 @@ defmodule Przma.Vault.PzdbConnector do
   def compact(actor, uri_string) do
     with {:ok, uri} <- PzdbUri.parse(uri_string),
          :ok <- PzdbAuthorization.authorize(actor, uri, :compact) do
-      NifAdapter.adapter().compact(uri)
+      BackendRouter.adapter_for(uri).compact(uri)
     end
   end
 end

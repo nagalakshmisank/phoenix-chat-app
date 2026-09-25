@@ -100,4 +100,21 @@ defmodule Przma.Vault.NamespacePolicy do
   @doc "Builds the VerbRegistry-style verb string for a namespace + operation, per the design doc's Section 3 mapping."
   @spec verb_for(namespace :: String.t(), operation :: :read | :write | :compact) :: String.t()
   def verb_for(namespace, operation), do: "vault.#{namespace}.#{operation}"
+
+  @doc """
+  Every namespace this policy knows. Used by CouchDocId and tests so
+  the namespace list is never duplicated anywhere else.
+  """
+  @spec namespaces() :: [String.t()]
+  def namespaces, do: @allowed_operations_by_namespace |> Map.keys() |> Enum.sort()
+
+  @doc """
+  Namespaces whose ceiling includes `operation`. CouchDesign generates
+  CouchDB's validate_doc_update from namespaces_allowing(:write), so
+  CouchDB enforces exactly this policy as a second layer.
+  """
+  @spec namespaces_allowing(:read | :write | :compact) :: [String.t()]
+  def namespaces_allowing(operation) do
+    for {namespace, ops} <- @allowed_operations_by_namespace, operation in ops, do: namespace
+  end
 end

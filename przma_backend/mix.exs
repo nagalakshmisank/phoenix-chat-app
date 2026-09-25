@@ -53,7 +53,12 @@ defmodule Przma.MixProject do
       {:hackney, "~> 1.20"},
       {:ecto_sql, "~> 3.11"},
       {:postgrex, ">= 0.0.0"},
-      {:cowlib, "~> 2.13.0", override: true}
+      {:cowlib, "~> 2.13.0", override: true},
+      # Pinned below 2.2 — ranch 2.2+ calls :proc_lib.set_label/1,
+      # which only exists on OTP 27+. This container runs OTP 26
+      # (erts-14.2.5.12), so anything >= 2.2 crashes
+      # PRZMAWeb.Endpoint on boot with an UndefinedFunctionError.
+      {:ranch, "~> 2.1.0", override: true}
     ]
   end
 end

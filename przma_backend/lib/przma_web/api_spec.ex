@@ -35,19 +35,21 @@ defmodule PRZMAWeb.ApiSpec do
         part of this API; that's Keycloak's built-in login endpoint),
         then use the returned `access_token` here.
 
-        ## Spaces
-        `POST /registration/complete` provisions all 3 of a user's
-        default spaces in one call: `vault` (private — where the
-        profile row itself lives), `public`, and `professional`.
-        `circle` exists in the storage layer but is intentionally NOT
-        auto-provisioned at registration.
+        ## Registration
+        `POST /registration/complete` (safe to repeat) creates the user's
+        CouchDB database `przma_{did}` and the profile document
+        `vault:private:profile`, and provisions the Lance `_meta` tables
+        for `public` and `professional` exactly as before.
 
         ## Storage
-        Profile data is written as a real Lance table in S3, via the
-        real `przma_pzdb_nif` NIF — see lib/przma/vault/lance_linode_adapter.ex
-        for the exact path shape and the two architecture decisions
-        (no tenant_uuid in the physical path; space defaults to "core")
-        that shape depends on.
+        Profile: CouchDB document `vault:private:profile` (source of truth)
+        in the user's own database, plus a read-only JSON mirror in S3 at
+        `{did}/vault/private/profile.couch.json`. Every read/write goes
+        through the pzdb URI, NamespacePolicy and PzdbAuthorization.
+        Files and `_meta` still use Lance (unchanged).
+
+        The same operations are available in GraphQL at `/api/graphql`
+        (`completeRegistration`, `profile`, `updateProfile`).
         """
       },
       servers: [
@@ -171,7 +173,9 @@ defmodule PRZMAWeb.ApiSpec do
         status: %Schema{type: :string, example: "registered"},
         did:    %Schema{type: :string, example: "did:przma:keerthi"},
         gid:    %Schema{type: :string, description: "tenant_uuid, from the JWT sub claim",
-                         example: "b656d159-9ad8-48f8-ae32-6969237e5fcc"}
+                         example: "b656d159-9ad8-48f8-ae32-6969237e5fcc"},
+        database: %Schema{type: :string, description: "The user's CouchDB database",
+                          example: "przma_did_przma_keerthi"}
       }
     }
   end
@@ -180,6 +184,7 @@ defmodule PRZMAWeb.ApiSpec do
     %Schema{
       type: :object, title: "ProfileAttrs",
       properties: %{
+        nickname:     %Schema{type: :string, nullable: true, example: "keerthi"},
         display_name: %Schema{type: :string, nullable: true, example: "keerthi"},
         bio:          %Schema{type: :string, nullable: true, example: "Backend developer at PRZMA"},
         avatar_cid:   %Schema{type: :string, nullable: true}
@@ -192,9 +197,22 @@ defmodule PRZMAWeb.ApiSpec do
       type: :object, title: "ProfileResponse",
       properties: %{
         profile: %Schema{
-          type: :string,
-          description: "Raw JSON string of the stored record, as returned " <>
-                       "by the real pzdb_read_many NIF call."
+          type: :object,
+          description: "Fields of the CouchDB document vault:private:profile.",
+          properties: %{
+            did:          %Schema{type: :string, example: "did:przma:keerthi"},
+            email:        %Schema{type: :string, nullable: true},
+            nickname:     %Schema{type: :string, nullable: true},
+            display_name: %Schema{type: :string, nullable: true},
+            bio:          %Schema{type: :string, nullable: true},
+            avatar_cid:   %Schema{type: :string, nullable: true},
+            namespace:    %Schema{type: :string, example: "vault"},
+            space:        %Schema{type: :string, example: "private"},
+            pzdb_uri:     %Schema{type: :string},
+            doc_ver:      %Schema{type: :integer, example: 1},
+            created_at:   %Schema{type: :integer, description: "Unix microseconds"},
+            updated_at:   %Schema{type: :integer, description: "Unix microseconds"}
+          }
         }
       }
     }

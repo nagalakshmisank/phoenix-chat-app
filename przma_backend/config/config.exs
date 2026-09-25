@@ -13,6 +13,11 @@ config :przma, :keycloak,
 
 config :przma, :vault_nif_adapter, Przma.Vault.LanceLinodeAdapter
 
+# {namespace, table} pairs stored in CouchDB (+ S3 JSON mirror) instead of
+# Lance (see Przma.Vault.BackendRouter). Everything else stays on Lance.
+config :przma, :doc_store_tables, [{"vault", "profile"}]
+config :przma, :doc_store_adapter, Przma.Vault.DocStoreAdapter
+
 config :logger, :console, format: "$time $metadata[$level] $message\n"
 
 import_config "#{config_env()}.exs"

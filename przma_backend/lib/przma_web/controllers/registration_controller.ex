@@ -1,24 +1,22 @@
 defmodule PRZMAWeb.RegistrationController do
   use PRZMAWeb, :controller
-  alias Przma.Vault.SpaceProvisioner
+  alias Przma.Vault.Registration
 
   @doc """
-  Called once, right after Keycloak registration completes and the
-  frontend has an access token — NOT on every login. Provisions all 4
-  spaces (vault/public/circle/professional) and writes the profile row
-  into the vault (private) space in the same call.
+  REST twin of the GraphQL `completeRegistration` mutation. Call once
+  right after Keycloak registration (re-running is safe). Identity comes
+  from the verified token only.
   """
   def complete(conn, params) do
-    actor = %{did: conn.assigns.did, origin_instance_id: nil, portable_grant: nil}
-    tenant_uuid = conn.assigns.tenant_uuid
-
-    profile_attrs = %{
-      email: conn.assigns.token_claims["email"],
-      nickname: Map.get(params, "nickname", conn.assigns.token_claims["preferred_username"])
+    identity = %{
+      did: conn.assigns.did,
+      tenant_uuid: conn.assigns.tenant_uuid,
+      storage_tier: conn.assigns[:storage_tier] || 1,
+      token_claims: conn.assigns[:token_claims] || %{}
     }
 
-    case SpaceProvisioner.provision_all(actor, tenant_uuid, profile_attrs) do
-      :ok -> json(conn, %{status: "registered", did: actor.did, gid: tenant_uuid})
+    case Registration.complete(identity, params["nickname"]) do
+      {:ok, result} -> json(conn, result)
       {:error, reason} -> conn |> put_status(422) |> json(%{error: inspect(reason)})
     end
   end
