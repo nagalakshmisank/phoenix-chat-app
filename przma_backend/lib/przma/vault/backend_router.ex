@@ -7,14 +7,15 @@ defmodule Przma.Vault.BackendRouter do
       {namespace, table} in doc_store_tables  -> DocStoreAdapter (CouchDB + S3 mirror)
       anything else                           -> NifAdapter.adapter() (Lance, untouched)
 
-  Current CouchDB table: vault/profile. Moving another service later means
+  Current CouchDB tables: vault/profile, files/index, files/cas_meta.
+  Moving another service later means
   adding its {namespace, table} here — or in config
   :przma, :doc_store_tables — not rewriting the service.
   """
 
   alias Przma.Vault.{NifAdapter, PzdbUri}
 
-  @default_doc_store_tables [{"vault", "profile"}]
+  @default_doc_store_tables [{"vault", "profile"}, {"files", "index"}, {"files", "cas_meta"}]
 
   @spec adapter_for(PzdbUri.t()) :: module()
   def adapter_for(%PzdbUri{namespace: namespace, table: table}) do

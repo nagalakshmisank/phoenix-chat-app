@@ -11,35 +11,38 @@ defmodule Przma.Storage.CouchDocId do
       pzdb://s3/{tenant}/did:przma:kc_user1/vault/private/profile
         -> "vault:private:profile"
 
-      a table with many records (e.g. chat later), record "01JC2M8Q"
-        -> "chat:private:inbox:01JC2M8Q"
+      files/private/index, record "Xk3p9…"   -> "files:private:index:Xk3p9…"
+      files/cas/cas_meta,  record "ab12…ef"  -> "files:cas:cas_meta:ab12…ef"
 
   Checks, all failing closed:
     * namespace must exist in NamespacePolicy (single source of truth)
-    * space must be private | public | personal
+    * space must be private | public | personal, or the internal "cas"
     * table must be lowercase a-z 0-9 _ (no ":" — it would break the id)
-    * record id, when present, must be A-Z a-z 0-9 _ - (ULIDs, UUIDs)
-
-  NOTE: the space check lives here, not in PzdbUri.parse/1, on purpose.
-  CasMeta (files namespace) uses the internal space "cas" for its
-  ledger, so a global check in PzdbUri would break the files feature.
-  Only CouchDB-bound URIs are restricted to the three vault spaces.
+    * record id, when present, must be A-Z a-z 0-9 _ - (ULIDs, UUIDs,
+      hex hashes, url-safe base64 file ids)
   """
 
   alias Przma.Vault.{NamespacePolicy, PzdbUri}
 
   @spaces ~w(private public personal)
+  # Internal, owner-only folders that are not user spaces: "cas" holds
+  # the per-user content-addressed ledger (files:cas:cas_meta:{hash}).
+  @internal_spaces ~w(cas)
   @table ~r/^[a-z0-9_]+$/
   @record ~r/^[A-Za-z0-9_\-]+$/
 
-  @doc "The three vault spaces a CouchDB document may live in."
+  @doc "The three user spaces."
   @spec spaces() :: [String.t()]
   def spaces, do: @spaces
+
+  @doc "Every space a CouchDB document may live in: the user spaces plus internal ones (cas)."
+  @spec all_spaces() :: [String.t()]
+  def all_spaces, do: @spaces ++ @internal_spaces
 
   @spec from_uri(PzdbUri.t(), String.t() | nil) :: {:ok, String.t()} | {:error, atom()}
   def from_uri(%PzdbUri{namespace: ns, space: space, table: table}, record_id \\ nil) do
     with {:ok, _scope} <- NamespacePolicy.vault_scope(ns),
-         :ok <- check(space in @spaces, :unknown_space),
+         :ok <- check(space in @spaces or space in @internal_spaces, :unknown_space),
          :ok <- check(is_binary(table) and Regex.match?(@table, table), :invalid_table),
          :ok <- check(valid_record?(record_id), :invalid_record_id) do
       {:ok, [ns, space, table, record_id] |> Enum.reject(&is_nil/1) |> Enum.join(":")}

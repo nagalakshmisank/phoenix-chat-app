@@ -7,10 +7,17 @@ defmodule PRZMAWeb.Graphql.Types.FilesTypes do
     field :mime_type, :string
     field :size_bytes, :integer
     field :content_cas, :string
+    field :space, :string
+    field :created_at, :integer
   end
 
+  @desc "commons: Postgres copy of the CAS metadata — \"replicated\" (public), \"skipped\" (private/personal) or \"failed: …\"."
   object :file_upload_result do
     field :file_id, :string
+    field :content_cas, :string
+    field :ref_count, :integer
+    field :space, :string
+    field :commons, :string
   end
 
   @desc "Content-only upload result — old REST POST /sync/blob equivalent. No file_id yet: no index row was written, just bytes + the CAS ledger bump."
@@ -18,6 +25,7 @@ defmodule PRZMAWeb.Graphql.Types.FilesTypes do
     field :content_cas, :string
     field :size_bytes, :integer
     field :ref_count, :integer
+    field :commons, :string
   end
 
   @desc "Old REST POST /sync/record equivalent — writes only the index row for a content_cas hash uploaded separately via uploadBlob."
@@ -34,6 +42,7 @@ defmodule PRZMAWeb.Graphql.Types.FilesTypes do
   object :file_sync_result do
     field :file_id, :string
     field :status, :string
+    field :commons, :string
   end
 
   @desc "One row of the CAS dedup ledger — old REST GET /sync/cas-meta equivalent. s3_uri is deliberately NOT exposed here (internal/analytics only, see CasMeta moduledoc)."
@@ -43,7 +52,10 @@ defmodule PRZMAWeb.Graphql.Types.FilesTypes do
     field :cas_uri, :string
     field :uri, :string
     field :uri_type, :string
+    @desc "Space of the most recent upload of this blob"
     field :space, :string
+    @desc "Every space that has referenced this blob"
+    field :spaces, list_of(:string)
     field :did, :string
     field :ref_count, :integer
     field :size_bytes, :integer

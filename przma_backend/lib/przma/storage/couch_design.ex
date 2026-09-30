@@ -10,7 +10,7 @@ defmodule Przma.Storage.CouchDesign do
     * _id must be {namespace}:{space}:{table}[:{record}]
     * namespace must be one NamespacePolicy allows :write for
       (read-only namespaces such as "calendar" are rejected)
-    * space must be private | public | personal
+    * space must be private | public | personal | cas
     * the namespace/space/table fields must match the _id
     * did is required
 
@@ -42,7 +42,7 @@ defmodule Przma.Storage.CouchDesign do
   @spec validate_doc_update_js() :: String.t()
   def validate_doc_update_js do
     namespaces = NamespacePolicy.namespaces_allowing(:write) |> Enum.sort() |> Jason.encode!()
-    spaces = Jason.encode!(CouchDocId.spaces())
+    spaces = Jason.encode!(CouchDocId.all_spaces())
 
     """
     function (newDoc, oldDoc, userCtx, secObj) {

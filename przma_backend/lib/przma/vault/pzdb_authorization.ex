@@ -65,6 +65,11 @@ defmodule Przma.Vault.PzdbAuthorization do
       NamespacePolicy.personal_space?(uri.space) ->
         memorial_exception(uri_did, actor_did, operation)
 
+      # "cas" (the per-user CAS ledger) is internal bookkeeping, not a
+      # shareable space: owner-only, no grants, no memorial exception.
+      NamespacePolicy.internal_space?(uri.space) ->
+        {:error, :internal_space_owner_only}
+
       true ->
         with {:ok, scope} <- resolve_scope(uri),
              verb <- NamespacePolicy.verb_for(uri.namespace, operation) do

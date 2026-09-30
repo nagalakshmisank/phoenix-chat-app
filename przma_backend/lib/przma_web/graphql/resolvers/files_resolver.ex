@@ -10,12 +10,11 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
   for anything beyond small files — the client fetches straight from
   S3 with the returned URL instead. See Cas.presigned_get_url/4.
 
-  `list/2` calls Przma.Vault.Files.list_recent/3, which goes through
-  PzdbConnector.read_many/2 -> LanceLinodeAdapter.query_many/1 (a
-  `did` COLUMN filter, no limit) instead of the old single-record
-  query/2 path — this is the fix for files having many rows per did,
-  each with its own generated id, unlike profile's one row per did.
-  query/2 itself (used by profile.ex) is untouched by this.
+  STORAGE: file metadata and the CAS ledger are CouchDB documents
+  (files:{space}:index:{file_id}, files:cas:cas_meta:{hash}) reached
+  through PzdbConnector -> BackendRouter -> DocStoreAdapter. Bytes are
+  in S3 ({did}/files/cas/…). Public uploads are also copied to Postgres;
+  the upload results report that as `commons`.
   """
 
   alias Przma.Vault.{CasMeta, Files}
@@ -28,8 +27,8 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
     with {:ok, bytes} <- File.read(upload.path),
          metadata = %{filename: upload.filename, content_type: upload.content_type, size_bytes: byte_size(bytes)},
          opts = [space: space] ++ if(owner_did, do: [owner_did: owner_did], else: []),
-         {:ok, file_id} <- Files.upload(actor, context.tenant_uuid, bytes, metadata, opts) do
-      {:ok, %{file_id: file_id}}
+         {:ok, result} <- Files.upload(actor, context.tenant_uuid, bytes, metadata, opts) do
+      {:ok, Map.put(result, :space, space)}
     else
       {:error, reason} -> {:error, inspect(reason)}
     end
@@ -52,7 +51,9 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
     actor = actor(context)
     space = Map.get(args, :space, "private")
     owner_did = Map.get(args, :owner_did)
-    opts = [space: space] ++ if(owner_did, do: [owner_did: owner_did], else: [])
+    opts =
+      [space: space, content_type: upload.content_type] ++
+        if(owner_did, do: [owner_did: owner_did], else: [])
 
     with {:ok, bytes} <- File.read(upload.path),
          {:ok, result} <- Files.upload_blob(actor, context.tenant_uuid, bytes, opts) do
@@ -80,7 +81,7 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
       |> Keyword.merge(if input[:file_id], do: [file_id: input.file_id], else: [])
 
     case Files.sync_record(actor, context.tenant_uuid, input.content_cas, metadata, opts) do
-      {:ok, file_id} -> {:ok, %{file_id: file_id, status: "synced"}}
+      {:ok, %{file_id: file_id, commons: commons}} -> {:ok, %{file_id: file_id, status: "synced", commons: commons}}
       {:error, reason} -> {:error, inspect(reason)}
     end
   end
@@ -109,6 +110,16 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
     end
   end
 
+  @doc "Postgres commons CAS check — for testing the public-file copy."
+  def commons_cas_status(_args, %{context: %{did: did}}) when is_binary(did) do
+    case Przma.CommonsCas.Replicator.health() do
+      {:ok, count} -> {:ok, "ok: #{count} rows in cas_table"}
+      {:error, reason} -> {:ok, "error: " <> reason}
+    end
+  end
+
+  def commons_cas_status(_args, _resolution), do: {:error, "unauthorized"}
+
   defp actor(context), do: %{did: context.did, origin_instance_id: nil, portable_grant: nil, roles: context.roles}
 
   defp normalize_cas_meta_row(row) do
@@ -118,7 +129,8 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
       cas_uri: row["cas_uri"],
       uri: row["uri"],
       uri_type: row["uri_type"],
-      space: row["space"],
+      space: row["last_space"] || row["space"],
+      spaces: row["referenced_spaces"] || [],
       did: row["did"],
       ref_count: row["ref_count"],
       size_bytes: row["size_bytes"],
@@ -141,7 +153,9 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
       name: row["name"],
       mime_type: row["mime_type"],
       size_bytes: row["size_bytes"],
-      content_cas: row["content_cas"]
+      content_cas: row["content_cas"],
+      space: row["space"],
+      created_at: row["created_at"]
     }
   end
 end

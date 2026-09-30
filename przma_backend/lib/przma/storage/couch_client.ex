@@ -95,12 +95,37 @@ defmodule Przma.Storage.CouchClient do
   Creates or updates a document. To update, the map must carry the
   current "_rev". Returns the new revision.
   """
-  @spec put_doc(db(), map()) :: {:ok, String.t()} | {:error, :conflict | {:forbidden, String.t()} | term()}
+  @spec put_doc(db(), map()) ::
+          {:ok, String.t()} | {:error, :conflict | :database_not_found | {:forbidden, String.t()} | term()}
   def put_doc(db, %{"_id" => id} = doc) do
     case request(:put, doc_path(db, id), doc) do
       {:ok, status, %{"rev" => rev}} when status in [201, 202] -> {:ok, rev}
       {:ok, 409, _} -> {:error, :conflict}
       {:ok, 403, %{"reason" => reason}} -> {:error, {:forbidden, reason}}
+      {:ok, 404, _} -> {:error, :database_not_found}
+      other -> to_error(other)
+    end
+  end
+
+  @doc """
+  All documents in `partition` whose _id starts with `prefix`, sorted by
+  _id (e.g. partition "files", prefix "files:private:index:"). Uses the
+  partition's own _all_docs, so only that namespace is read.
+  Returns {:error, :not_found} when the database does not exist.
+  """
+  @spec list_by_prefix(db(), String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_by_prefix(db, partition, prefix, opts \\ []) do
+    query =
+      URI.encode_query(%{
+        "startkey" => Jason.encode!(prefix),
+        "endkey" => Jason.encode!(prefix <> "\u{FFF0}"),
+        "include_docs" => "true",
+        "limit" => Integer.to_string(Keyword.get(opts, :limit, 1000))
+      })
+
+    case request(:get, db_path(db) <> "/_partition/" <> encode(partition) <> "/_all_docs?" <> query, nil) do
+      {:ok, 200, %{"rows" => rows}} -> {:ok, for(%{"doc" => doc} <- rows, is_map(doc), do: doc)}
+      {:ok, 404, _} -> {:error, :not_found}
       other -> to_error(other)
     end
   end

@@ -6,28 +6,31 @@ defmodule Przma.Vault.DocStoreAdapter do
   Reached ONLY via PzdbConnector -> BackendRouter, so every call here has
   already passed PzdbUri.parse, NamespacePolicy and PzdbAuthorization.
 
-  Lance vs CouchDB for the same pzdb URI:
+  One CouchDB database per user; document ids come only from
+  CouchDocId.from_uri/2 ({namespace}:{space}:{table}[:{record}]) and
+  database names only from CouchDbName.from_did/1 — never by hand.
 
-      pzdb://s3/{tenant}/did:przma:kc_user1/vault/private/profile
+  Tables served here (config :przma, :doc_store_tables):
 
-      Lance    s3://perkeep/did_przma_kc_user1/vault/private/profile.lance   (row)
-      CouchDB  przma_did_przma_kc_user1  →  doc "vault:private:profile"     (fields)
-      S3 view  s3://perkeep/did_przma_kc_user1/vault/private/profile.couch.json
+      vault/private/profile      -> vault:private:profile            (one doc)
+      files/{space}/index        -> files:{space}:index:{file_id}    (one doc per file)
+      files/cas/cas_meta         -> files:cas:cas_meta:{sha256}      (one doc per unique blob)
 
-  The profile fields are stored IN the CouchDB document (like the row in
-  profile.lance). There is no separate data file for the profile.
+  Write semantics:
+    * single-doc tables (profile): insert/2 is CREATE-ONLY and returns
+      {:error, :already_exists} if the doc exists (registration relies
+      on this to be idempotent); merge_insert/3 merges fields.
+    * record tables (files index, cas_meta): insert/2 and merge_insert/3
+      both UPSERT — same contract as the Lance adapter (PRZMA.PzDb.write
+      upserts by id), so Files/CasMeta need no special casing.
 
-  Write order: CouchDB first (source of truth), then the S3 JSON mirror
-  (see S3Mirror — a mirror failure is logged, never fails the request).
+  Atomic field operations (used by CasMeta), applied to the CURRENT
+  document under its _rev, retried on a CouchDB 409 conflict:
+      "$inc"        => %{"ref_count" => 1}          add to a number
+      "$add_to_set" => %{"referenced_spaces" => sp}  add to a list once
 
-  Semantics (same contract the Lance adapter offers):
-    insert/2        create; {:error, :already_exists} if the doc exists
-    merge_insert/3  field-level merge into the existing doc (PATCH)
-    query/2         the document's fields as a JSON binary
-    get_by_id/2     same, for tables with one doc per record id
-
-  Document ids come only from CouchDocId.from_uri/2 and database names
-  only from CouchDbName.from_did/1 — never written by hand.
+  S3 JSON mirror (*.couch.json) is written only for tables listed in
+  config :przma, :s3_mirror_tables (default: vault/profile only).
   """
 
   @behaviour Przma.Vault.NifAdapter
@@ -41,6 +44,11 @@ defmodule Przma.Vault.DocStoreAdapter do
   @meta_keys ~w(id tier)
   # Envelope fields are always set by this adapter, never by callers.
   @envelope_keys ~w(_id _rev type vault_id namespace space table did gid pzdb_uri doc_ver created_at updated_at)
+  # Atomic operations understood by write/6.
+  @op_keys ~w($inc $add_to_set)
+  @max_conflict_retries 5
+  @default_mirror_tables [{"vault", "profile"}]
+  @list_limit 1000
 
   # ── NifAdapter callbacks ─────────────────────────────────────────────
 
@@ -48,7 +56,7 @@ defmodule Przma.Vault.DocStoreAdapter do
   def open(%PzdbUri{}), do: :ok
 
   @impl true
-  def insert(%PzdbUri{} = uri, rows) when is_list(rows), do: each_row(rows, &store(uri, &1, :create))
+  def insert(%PzdbUri{} = uri, rows) when is_list(rows), do: each_row(rows, &store(uri, &1, insert_mode(uri)))
   def insert(%PzdbUri{}, _arrow_binary), do: {:error, :arrow_ipc_not_supported}
 
   @impl true
@@ -61,8 +69,24 @@ defmodule Przma.Vault.DocStoreAdapter do
   @impl true
   def get_by_id(%PzdbUri{} = uri, id), do: read(uri, id)
 
+  @doc """
+  All documents of this URI's {namespace, space, table} for the URI's
+  DID, as a JSON array. Each element carries "id" = the record id (the
+  last segment of the CouchDB _id). A user whose database does not
+  exist yet simply has no documents -> "[]".
+  """
   @impl true
-  def query_many(%PzdbUri{}), do: {:error, :not_implemented}
+  def query_many(%PzdbUri{namespace: ns, did: did} = uri) do
+    with {:ok, table_id} <- CouchDocId.from_uri(uri, nil) do
+      prefix = table_id <> ":"
+
+      case CouchClient.list_by_prefix(CouchDbName.from_did(did), ns, prefix, limit: @list_limit) do
+        {:ok, docs} -> {:ok, docs |> Enum.map(&to_fields(&1, prefix)) |> Jason.encode!()}
+        {:error, :not_found} -> {:ok, "[]"}
+        {:error, _} = err -> err
+      end
+    end
+  end
 
   @impl true
   def query_since(%PzdbUri{}, _since), do: {:error, :not_implemented}
@@ -75,6 +99,9 @@ defmodule Przma.Vault.DocStoreAdapter do
 
   # ── write path ───────────────────────────────────────────────────────
 
+  defp insert_mode(%PzdbUri{table: table}) when table in @single_doc_tables, do: :create
+  defp insert_mode(%PzdbUri{}), do: :upsert
+
   defp each_row(rows, fun) do
     Enum.reduce_while(rows, :ok, fn row, :ok ->
       case fun.(row) do
@@ -84,32 +111,73 @@ defmodule Przma.Vault.DocStoreAdapter do
     end)
   end
 
-  defp store(%PzdbUri{} = uri, row, mode) do
+  defp store(%PzdbUri{} = uri, row, mode, attempt \\ 1) do
     row = stringify_keys(row)
     record_id = record_id(uri, row)
 
-    with {:ok, db, id} <- locate(uri, record_id) do
-      case {mode, CouchClient.get_doc(db, id)} do
-        {:create, {:ok, _doc}} -> {:error, :already_exists}
-        {_mode, {:ok, doc}} -> write(uri, record_id, db, id, row, doc)
-        {_mode, {:error, :not_found}} -> write(uri, record_id, db, id, row, nil)
-        {_mode, {:error, _} = err} -> err
+    result =
+      with {:ok, db, id} <- locate(uri, record_id) do
+        case {mode, CouchClient.get_doc(db, id)} do
+          {:create, {:ok, _doc}} -> {:error, :already_exists}
+          {_mode, {:ok, doc}} -> write(uri, record_id, db, id, row, doc)
+          {_mode, {:error, :not_found}} -> write(uri, record_id, db, id, row, nil)
+          {_mode, {:error, _} = err} -> err
+        end
       end
+
+    case result do
+      # Someone else updated the doc between our read and write (e.g. two
+      # uploads of the same file bumping ref_count). Re-read and re-apply.
+      {:error, :conflict} when mode == :upsert and attempt < @max_conflict_retries ->
+        Process.sleep(10 * attempt)
+        store(uri, row, mode, attempt + 1)
+
+      {:error, :conflict} when mode == :create ->
+        {:error, :already_exists}
+
+      {:error, :database_not_found} ->
+        {:error, :user_vault_not_provisioned}
+
+      other ->
+        other
     end
   end
 
   defp write(%PzdbUri{} = uri, record_id, db, id, row, existing) do
+    {ops, row} = Map.split(row, @op_keys)
     fields = Map.drop(row, @meta_keys ++ @envelope_keys)
     previous = if existing, do: Map.drop(existing, @envelope_keys), else: %{}
 
     doc =
       previous
       |> Map.merge(fields)
+      |> apply_inc(Map.get(ops, "$inc", %{}))
+      |> apply_add_to_set(Map.get(ops, "$add_to_set", %{}))
       |> Map.merge(envelope(uri, id, existing))
 
     with {:ok, rev} <- CouchClient.put_doc(db, doc) do
-      S3Mirror.put(uri, record_id, Map.put(doc, "_rev", rev))
+      if mirror?(uri), do: S3Mirror.put(uri, record_id, Map.put(doc, "_rev", rev))
+      :ok
     end
+  end
+
+  defp apply_inc(doc, incs) do
+    Enum.reduce(incs, doc, fn {field, delta}, acc ->
+      current = if is_number(acc[field]), do: acc[field], else: 0
+      Map.put(acc, to_string(field), current + delta)
+    end)
+  end
+
+  defp apply_add_to_set(doc, adds) do
+    Enum.reduce(adds, doc, fn {field, value}, acc ->
+      field = to_string(field)
+      current = if is_list(acc[field]), do: acc[field], else: []
+      Map.put(acc, field, if(value in current, do: current, else: current ++ [value]))
+    end)
+  end
+
+  defp mirror?(%PzdbUri{namespace: ns, table: table}) do
+    {ns, table} in Application.get_env(:przma, :s3_mirror_tables, @default_mirror_tables)
   end
 
   # ── read path ────────────────────────────────────────────────────────
@@ -117,9 +185,18 @@ defmodule Przma.Vault.DocStoreAdapter do
   defp read(%PzdbUri{} = uri, record_id) do
     with {:ok, db, id} <- locate(uri, record_id),
          {:ok, doc} <- CouchClient.get_doc(db, id) do
-      {:ok, doc |> Map.drop(["_id", "_rev"]) |> Jason.encode!()}
+      fields = doc |> Map.drop(["_id", "_rev"]) |> maybe_put_id(record_id)
+      {:ok, Jason.encode!(fields)}
     end
   end
+
+  defp to_fields(%{"_id" => doc_id} = doc, prefix) do
+    record_id = String.replace_prefix(doc_id, prefix, "")
+    doc |> Map.drop(["_id", "_rev"]) |> Map.put("id", record_id)
+  end
+
+  defp maybe_put_id(fields, nil), do: fields
+  defp maybe_put_id(fields, record_id), do: Map.put(fields, "id", record_id)
 
   # ── envelope ─────────────────────────────────────────────────────────
 

@@ -1,41 +1,27 @@
 defmodule Przma.Vault.CasMeta do
   @moduledoc """
-  Dedup ledger for Przma.Vault.Cas — the metadata table equivalent of
-  the old przma-phoenix `cas_meta` Lance table.
+  Per-user CAS (content-addressed storage) ledger — one CouchDB document
+  per unique file hash, in the internal "cas" folder of the files service:
 
-  Cas.put/3 already dedups the physical bytes (one S3 object per
-  unique hash per {did, namespace}), but the physical store alone
-  can't answer "how many file records point at this blob" or "what's
-  the external-facing URI for this hash". That's this module's job:
-  one row per unique content hash, `ref_count` incremented every time
-  any space's file record references that hash.
+      pzdb://s3/{tenant}/{did}/files/cas/cas_meta
+        -> CouchDB  przma_{did} / files:cas:cas_meta:{sha256}
 
-  Deliberately keyed the same way Cas keys physical bytes — by
-  {did, namespace} only, NOT by space (see Cas moduledoc): a blob
-  uploaded into "private" and later referenced from "public" is still
-  one physical object and one ledger row, `ref_count` 2.
+  The bytes themselves are NOT here: Cas.put/3 stores them once per hash
+  in S3 at {did}/files/cas/{shard}/{sha256}. This document describes that
+  object: size, S3 location, how many file records point at it
+  (ref_count) and which spaces referenced it (referenced_spaces).
 
-  Lives in a FIXED space — `"cas"` — regardless of which space(s)
-  actually reference the blob. `"cas"` is the same folder Cas.put/3
-  already writes raw blob shards into (see Cas moduledoc: dedup is
-  per {did, namespace}, not per space), so the ledger sits right next
-  to the bytes it describes rather than nested inside one of the
-  three real spaces. Ledger reads/writes are always same-DID (owner
-  reading/writing their own dedup ledger), which is authorized under
-  PzdbAuthorization.check_owner_or_grant/3 regardless of the space
-  string on the URI — so this placement doesn't change authorization
-  at all. Which space(s) actually referenced the blob is instead
-  carried as a plain FIELD on each row (see record/4).
+  Keyed by hash only, NOT by space: the same bytes uploaded into
+  "private" and later "public" are one S3 object and one ledger document
+  with ref_count 2 and referenced_spaces ["private", "public"].
 
-  Physical path (via LanceLinodeAdapter): pzdb://{did}/files/cas/cas_meta
-    -> s3://<bucket>/{sanitized_did}/files/cas/cas_meta.lance/
-       (a sibling of files/cas/{shard}/{hash} — the raw blob shards)
+  ref_count is incremented ATOMICALLY: the row carries
+  "$inc" => %{"ref_count" => 1}, which DocStoreAdapter applies to the
+  current document under its _rev and retries on a CouchDB conflict —
+  two simultaneous uploads of the same file both count.
 
-  Table name "cas_meta" is not just a label — it's the literal string
-  the Rust NIF's schema_for/1 and pzdb_upsert/4 match on
-  (native/przma_pzdb_nif/src/lib.rs) to pick cas_meta_schema() and
-  json_to_cas_meta_batch/1 instead of falling through to the generic
-  files-table path. Renaming @table would silently misroute writes.
+  "cas" is owner-only (NamespacePolicy.internal_space?/1): no other user
+  can read or write someone's ledger.
   """
 
   alias Przma.Vault.{PzdbConnector, PzdbUri}
@@ -44,31 +30,9 @@ defmodule Przma.Vault.CasMeta do
   @ledger_space "cas"
   @table "cas_meta"
 
-  @type row :: %{
-          id: String.t(),
-          hash: String.t(),
-          cas_uri: String.t(),
-          uri: String.t(),
-          uri_type: String.t(),
-          s3_uri: String.t(),
-          space: String.t(),
-          did: String.t(),
-          ref_count: integer(),
-          size_bytes: integer(),
-          created_at: integer(),
-          updated_at: integer()
-        }
-
   @doc """
-  Records that `digest` was just written (or re-referenced) by `space`
-  under `owner_did`. Read-modify-write, same pattern as the old
-  controller's record_cas_meta/5 — the real pzdb_upsert NIF has no
-  atomic increment, so the current ref_count is read first.
-
-  Not itself an authorization gate for the CAS write that preceded
-  it — Cas.put/3 already ran that check against `uri` before any
-  bytes touched S3. This call authorizes separately (same actor,
-  ledger's own pseudo-URI) purely to reach the ledger table.
+  Records that `digest` was just written (or re-referenced) from `space`
+  under `owner_did`. Returns the new ref_count.
   """
   @spec record(
           actor :: PzdbConnector.actor(),
@@ -80,56 +44,58 @@ defmodule Przma.Vault.CasMeta do
         ) :: {:ok, non_neg_integer()} | {:error, term()}
   def record(actor, tenant_uuid, owner_did, digest, size_bytes, space) do
     uri_string = build_uri(tenant_uuid, owner_did)
-    ref_count = current_ref_count(actor, uri_string, digest) + 1
 
     row = %{
-      id: digest,
-      hash: digest,
-      cas_uri: "cas:#{digest}",
-      uri: shareable_uri(digest, owner_did),
-      uri_type: "graphql",
-      s3_uri: internal_s3_uri(owner_did, digest),
-      space: space,
-      did: owner_did,
-      gid: tenant_uuid,
-      ref_count: ref_count,
-      size_bytes: size_bytes,
-      created_at: System.os_time(:microsecond),
-      updated_at: System.os_time(:microsecond)
+      "id" => digest,
+      "hash" => digest,
+      "hash_alg" => "sha256",
+      "cas_uri" => "cas:sha256:#{digest}",
+      "uri" => shareable_uri(digest, owner_did),
+      "uri_type" => "graphql",
+      "s3_key" => s3_key(owner_did, digest),
+      "s3_uri" => internal_s3_uri(owner_did, digest),
+      "size_bytes" => size_bytes,
+      "last_space" => space,
+      "$inc" => %{"ref_count" => 1},
+      "$add_to_set" => %{"referenced_spaces" => space}
     }
 
-    case PzdbConnector.write(actor, uri_string, [row]) do
-      :ok -> {:ok, ref_count}
+    with :ok <- PzdbConnector.write(actor, uri_string, [row]),
+         {:ok, doc} <- get(actor, tenant_uuid, owner_did, digest) do
+      {:ok, doc["ref_count"] || 1}
+    end
+  end
+
+  @doc "One ledger document by hash (a map), or {:error, :not_found}."
+  @spec get(PzdbConnector.actor(), String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get(actor, tenant_uuid, owner_did, digest) do
+    with {:ok, raw} <- PzdbConnector.read_by_id(actor, build_uri(tenant_uuid, owner_did), digest),
+         {:ok, %{} = doc} <- Jason.decode(raw) do
+      {:ok, doc}
+    else
+      {:ok, _other} -> {:error, :not_found}
       {:error, _} = err -> err
     end
   end
 
-  @doc "Lists every ledger row (one per unique blob) for `owner_did` — the CAS-meta equivalent of Files.list_recent/3."
+  @doc "Every ledger document (one per unique blob) for `owner_did`."
   @spec list(actor :: PzdbConnector.actor(), tenant_uuid :: String.t(), owner_did :: String.t()) ::
           {:ok, [map()]} | {:error, term()}
   def list(actor, tenant_uuid, owner_did) do
-    uri_string = build_uri(tenant_uuid, owner_did)
-
-    case PzdbConnector.read_many(actor, uri_string) do
+    case PzdbConnector.read_many(actor, build_uri(tenant_uuid, owner_did)) do
       {:ok, raw} -> {:ok, decode_rows(raw)}
       {:error, _} = err -> err
     end
   end
 
-  # -- private -------------------------------------------------------
-
-  defp current_ref_count(actor, uri_string, digest) do
-    case PzdbConnector.read_by_id(actor, uri_string, digest) do
-      {:ok, raw} ->
-        case Jason.decode(raw) do
-          {:ok, %{"ref_count" => rc}} when is_integer(rc) -> rc
-          _ -> 0
-        end
-
-      {:error, _} ->
-        0
-    end
+  @doc "Internal S3 URI of the blob — the value replicated to Postgres for public files."
+  @spec internal_s3_uri(String.t(), String.t()) :: String.t()
+  def internal_s3_uri(did, digest) do
+    endpoint = vault_config(:s3_endpoint) || ""
+    "#{endpoint}/#{vault_config(:s3_bucket)}/#{s3_key(did, digest)}"
   end
+
+  # -- private -------------------------------------------------------
 
   defp build_uri(tenant_uuid, did) do
     %PzdbUri{
@@ -150,15 +116,9 @@ defmodule Przma.Vault.CasMeta do
     "/api/graphql#blobDownloadUrl(hash:\"#{digest}\",owner:\"#{owner_did}\")"
   end
 
-  # Internal/analytics only — mirrors Cas's own cas_key/2 shape.
-  # NEVER returned over GraphQL (see FilesTypes.cas_meta_row — no
-  # s3_uri field is exposed there on purpose).
-  defp internal_s3_uri(did, digest) do
-    shard = String.slice(digest, 0, 2)
-    sanitized_did = String.replace(did, [":", " "], "_")
-    endpoint = vault_config(:s3_endpoint) || ""
-    bucket = vault_config(:s3_bucket)
-    "#{endpoint}/#{bucket}/#{sanitized_did}/#{@namespace}/cas/#{shard}/#{digest}"
+  # Same key shape Cas.put/3 writes: {sanitized_did}/files/cas/{shard}/{hash}
+  defp s3_key(did, digest) do
+    "#{String.replace(did, [":", " "], "_")}/#{@namespace}/cas/#{String.slice(digest, 0, 2)}/#{digest}"
   end
 
   defp vault_config(key), do: Application.get_env(:przma, :vault) |> Keyword.get(key)

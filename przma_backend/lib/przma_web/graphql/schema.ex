@@ -18,6 +18,11 @@ defmodule PRZMAWeb.Graphql.Schema do
       resolve &FilesResolver.list/2
     end
 
+    @desc "Postgres commons CAS check: \"ok: N rows\" or \"error: …\" (connection / table problems)."
+    field :commons_cas_status, :string do
+      resolve &FilesResolver.commons_cas_status/2
+    end
+
     @desc "Old REST GET /sync/cas-meta equivalent."
     field :cas_meta, list_of(:cas_meta_row) do
       arg :owner_did, :string

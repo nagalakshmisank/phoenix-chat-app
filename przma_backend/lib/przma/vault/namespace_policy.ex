@@ -45,6 +45,16 @@ defmodule Przma.Vault.NamespacePolicy do
   def personal_space?(@personal_space), do: true
   def personal_space?(_other), do: false
 
+  @internal_spaces ["cas"]
+
+  @doc """
+  Internal folders that are not user spaces — "cas" holds a user's
+  content-addressed ledger (files:cas:cas_meta:{hash}). Owner-only,
+  never grantable, and (unlike "personal") no memorial exception.
+  """
+  @spec internal_space?(space :: String.t()) :: boolean()
+  def internal_space?(space), do: space in @internal_spaces
+
   @doc """
   The vault_scope a namespace maps to, for grant/governance checks.
   Unrecognized namespace -> error, fails closed.
@@ -57,20 +67,18 @@ defmodule Przma.Vault.NamespacePolicy do
     end
   end
 
-  @doc """
-  Per-namespace operation CEILING — independent of, and checked before,
-  ownership or any grant. Applies regardless of which space a request
-  targets: a namespace listed read-only here stays read-only even for
-  its "personal" space, same as it would for "private" or "public".
-
-  CAUTION — calendar is listed read-only below to match the example
-  given when this table was designed, but lib/przma/vault/calendar.ex
-  currently has its own write actions (creating/updating events). If
-  calendar is meant to stay writable through that module, either this
-  entry needs [:read, :write] or calendar.ex's writes need to go
-  through a different namespace than "calendar" — confirm before
-  deploying, this WILL break calendar.ex's writes as currently listed.
-  """
+  # Per-namespace operation CEILING — independent of, and checked before,
+  # ownership or any grant. Applies regardless of which space a request
+  # targets: a namespace listed read-only here stays read-only even for
+  # its "personal" space, same as it would for "private" or "public".
+  #
+  # CAUTION — calendar is listed read-only below to match the example
+  # given when this table was designed, but lib/przma/vault/calendar.ex
+  # currently has its own write actions (creating/updating events). If
+  # calendar is meant to stay writable through that module, either this
+  # entry needs [:read, :write] or calendar.ex's writes need to go
+  # through a different namespace than "calendar" — confirm before
+  # deploying, this WILL break calendar.ex's writes as currently listed.
   @allowed_operations_by_namespace %{
     "vault" => [:read, :write],
     "moments" => [:read, :write, :compact],

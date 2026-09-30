@@ -1,67 +1,96 @@
 defmodule Przma.CommonsCas.Replicator do
   @moduledoc """
-  Replicates CAS metadata for PUBLIC-space uploads into
-  przma_commons_cas.cas_table, for analytics. Best-effort — a
-  Postgres outage never fails a file upload whose bytes and Lance
-  metadata already succeeded. Only ever called from
-  Przma.Vault.Files.upload/5, AFTER Cas.put/3 has already run the
-  real PzdbAuthorization check for the public-space write — this
-  module performs no authorization check of its own, because it
-  cannot be reached except as a direct consequence of one that
-  already passed.
+  Copies CAS metadata of PUBLIC-space uploads into Postgres
+  przma_commons_cas.cas_table (one row per owner DID + hash).
 
-  ASSUMES `hash` has a UNIQUE constraint on cas_table (needed for
-  on_conflict/conflict_target below to work as an upsert rather than
-  error on a repeat upload of the same content). Confirm with:
-    SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
-    WHERE conrelid = 'cas_table'::regclass;
-  If there's no such constraint, replace the Repo.insert call below
-  with a manual Repo.get_by(CasRecord, hash: hash) + insert-or-update.
+  Called by Przma.Vault.Files for all three upload paths (upload/5,
+  upload_blob/4, sync_record/5), only for space "public", and only
+  after the CouchDB writes succeeded — so it needs no authorization of
+  its own.
+
+  WHY THE LANCE VERSION NEVER WROTE A ROW — fixed here:
+    1. It was only called from upload/5; uploadBlob + syncFileRecord
+       never replicated.
+    2. It used `on_conflict: …, conflict_target: :hash`, which fails
+       unless cas_table has a UNIQUE index on exactly (hash). Any error
+       was caught and only logged as a warning, so it looked like
+       success.
+    3. Every error (table missing, wrong columns, database unreachable
+       from the container) was swallowed the same way.
+
+  This version: looks up (did, hash) first and then INSERTs or UPDATEs,
+  so it works with or without a unique index; it never raises, but it
+  RETURNS {:error, reason} and logs at error level, and Files puts the
+  outcome into the upload response ("replicated" / "failed: …").
   """
+
   require Logger
+  import Ecto.Query, only: [from: 2]
 
   alias Przma.CommonsCas.{CasRecord, Repo}
 
-  @spec replicate(
-          owner_did :: String.t(),
-          created_by_did :: String.t(),
-          hash :: String.t(),
-          mime_type :: String.t(),
-          size_bytes :: integer(),
-          ref_count :: integer(),
-          s3_uri :: String.t()
-        ) :: :ok
-  def replicate(owner_did, created_by_did, hash, mime_type, size_bytes, ref_count, s3_uri) do
-    attrs = %{
-      hash: hash,
-      did: owner_did,
-      mime_type: mime_type,
-      size_bytes: size_bytes,
-      created_by: created_by_did,
-      ref_count: ref_count,
-      is_encrypted: false,
-      s3_uri: s3_uri,
-      file_origin: owner_did
-    }
+  @type attrs :: %{
+          required(:hash) => String.t(),
+          required(:did) => String.t(),
+          optional(:created_by) => String.t(),
+          optional(:file_origin) => String.t(),
+          optional(:mime_type) => String.t(),
+          optional(:size_bytes) => integer(),
+          optional(:ref_count) => integer(),
+          optional(:is_encrypted) => boolean(),
+          optional(:s3_uri) => String.t()
+        }
 
-    %CasRecord{}
-    |> Ecto.Changeset.cast(attrs, [
-      :hash, :did, :mime_type, :size_bytes, :created_by, :ref_count, :is_encrypted, :s3_uri, :file_origin
-    ])
-    |> Repo.insert(
-      on_conflict: {:replace, [:ref_count, :size_bytes, :updated_at]},
-      conflict_target: :hash
-    )
-    |> case do
-      {:ok, _} -> :ok
-      {:error, reason} -> log_and_continue(reason, hash)
+  @spec replicate(attrs()) :: :ok | {:error, String.t()}
+  def replicate(%{hash: hash, did: did} = attrs) when is_binary(hash) and is_binary(did) do
+    existing =
+      Repo.one(from(r in CasRecord, where: r.did == ^did and r.hash == ^hash, limit: 1))
+
+    result =
+      case existing do
+        nil -> %CasRecord{} |> CasRecord.changeset(attrs) |> Repo.insert()
+        %CasRecord{} = row -> row |> CasRecord.changeset(Map.put(attrs, :deleted_at, nil)) |> Repo.update()
+      end
+
+    case result do
+      {:ok, _row} ->
+        Logger.info("[CommonsCas] public CAS row saved did=#{did} hash=#{hash}")
+        :ok
+
+      {:error, %Ecto.Changeset{} = cs} ->
+        fail(hash, "invalid row: #{inspect(cs.errors)}")
     end
   rescue
-    e -> log_and_continue(e, hash)
+    e -> fail(hash, Exception.message(e))
   end
 
-  defp log_and_continue(reason, hash) do
-    Logger.warning("[Przma.CommonsCas.Replicator] replication failed hash=#{hash} reason=#{inspect(reason)}")
-    :ok
+  @doc "Old 7-argument form, kept so any other caller still compiles."
+  @spec replicate(String.t(), String.t(), String.t(), String.t(), integer(), integer(), String.t()) ::
+          :ok | {:error, String.t()}
+  def replicate(owner_did, created_by_did, hash, mime_type, size_bytes, ref_count, s3_uri) do
+    replicate(%{
+      hash: hash,
+      did: owner_did,
+      created_by: created_by_did,
+      file_origin: owner_did,
+      mime_type: mime_type,
+      size_bytes: size_bytes,
+      ref_count: ref_count,
+      is_encrypted: false,
+      s3_uri: s3_uri
+    })
+  end
+
+  @doc "Quick connectivity/table check: {:ok, row_count} or {:error, reason}."
+  @spec health() :: {:ok, non_neg_integer()} | {:error, String.t()}
+  def health do
+    {:ok, Repo.aggregate(CasRecord, :count)}
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp fail(hash, reason) do
+    Logger.error("[CommonsCas] public CAS replication FAILED hash=#{hash} reason=#{reason}")
+    {:error, reason}
   end
 end
