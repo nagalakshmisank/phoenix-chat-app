@@ -47,12 +47,27 @@ defmodule Przma.MixProject do
       {:open_api_spex, "~> 3.18"},
       {:absinthe, "~> 1.7"},
       {:absinthe_plug, "~> 1.5"},
-      {:ex_aws, "~> 2.5"},
-      {:ex_aws_s3, "~> 2.5"},
+      # override: true — Beacon 0.5.1 pins ex_aws/ex_aws_s3 to ~> 2.4.0 (for its
+      # media-library S3 multipart copy, which we don't use). We keep 2.5+.
+      {:ex_aws, "~> 2.5", override: true},
+      {:ex_aws_s3, "~> 2.5", override: true},
       {:sweet_xml, "~> 0.7"},
       {:hackney, "~> 1.20"},
       {:ecto_sql, "~> 3.11"},
       {:postgrex, ">= 0.0.0"},
+
+      # ── Beacon CMS admin dashboard (lib/przma/beacon, lib/przma_web/beacon) ──
+      # Only RUNS when BEACON_ENABLED=true; see lib/przma/beacon/supervisor.ex.
+      {:beacon, "~> 0.5.1"},
+      {:beacon_live_admin, "~> 0.4.3"},
+      {:phoenix_live_view, "~> 1.0.0"},
+      {:phoenix_html, "~> 4.1"},
+      # Pins that keep Elixir 1.16 working (newer versions need Elixir 1.17):
+      {:image, "~> 0.63.0"},
+      {:live_svelte, "~> 0.16.0"},
+      # Markdown engine version Beacon 0.5.1 was released against
+      {:mdex, "~> 0.5.0"},
+
       {:cowlib, "~> 2.13.0", override: true},
       # Pinned below 2.2 — ranch 2.2+ calls :proc_lib.set_label/1,
       # which only exists on OTP 27+. This container runs OTP 26

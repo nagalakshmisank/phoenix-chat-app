@@ -30,6 +30,8 @@ defmodule Przma.Vault.Registration do
 
     case SpaceProvisioner.provision_all(actor, tenant_uuid, attrs, tier: identity[:storage_tier] || 1) do
       :ok ->
+        # Beacon CMS: show "Completed registration" in the admin activity feed
+        Przma.Beacon.track(did, "registration_completed", %{tier: identity[:storage_tier] || 1})
         {:ok, %{status: "registered", did: did, gid: tenant_uuid, database: CouchDbName.from_did(did)}}
 
       {:error, _} = err ->

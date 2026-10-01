@@ -55,3 +55,34 @@ config :przma, :couchdb,
 # settings above. CouchDB stays the source of truth.
 config :przma, :s3_mirror,
   enabled: System.get_env("S3_MIRROR_ENABLED", "true") == "true"
+
+# ── Beacon CMS admin dashboard ─────────────────────────────────────────
+# OFF by default. Turn on with:  export BEACON_ENABLED=true
+config :przma, :beacon,
+  enabled: System.get_env("BEACON_ENABLED", "false") == "true",
+  timezone: System.get_env("BEACON_TIMEZONE", "Asia/Kolkata")
+
+config :przma, PRZMAWeb.Beacon.AdminEndpoint,
+  http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("BEACON_ADMIN_PORT", "4300"))]
+
+if secret_key_base = System.get_env("SECRET_KEY_BASE") do
+  config :przma, PRZMAWeb.Beacon.AdminEndpoint, secret_key_base: secret_key_base
+end
+
+# Beacon database (becam_cms). The server allows 10 connections — this app
+# uses 5 (admin pages + activity collector). Password ONLY from env.
+config :przma, Przma.Beacon.Repo,
+  hostname: System.get_env("BEACON_DB_HOST", "172.235.18.126"),
+  port: String.to_integer(System.get_env("BEACON_DB_PORT", "5432")),
+  database: System.get_env("BEACON_DB_NAME", "becam_cms"),
+  username: System.get_env("BEACON_DB_USER", "becam_cms_user"),
+  password: System.get_env("BEACON_DB_PASSWORD"),
+  pool_size: String.to_integer(System.get_env("BEACON_DB_POOL", "5")),
+  log: false
+
+# Beacon CMS site :przma (served by the admin endpoint at /site)
+config :beacon, :przma,
+  site: :przma,
+  repo: Przma.Beacon.Repo,
+  endpoint: PRZMAWeb.Beacon.AdminEndpoint,
+  router: PRZMAWeb.Beacon.AdminRouter

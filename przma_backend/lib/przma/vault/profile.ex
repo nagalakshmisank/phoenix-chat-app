@@ -35,7 +35,10 @@ defmodule Przma.Vault.Profile do
         created_at: System.os_time(:microsecond)
       })
 
-    PzdbConnector.write(actor, uri(tenant_uuid, did), [row])
+    actor
+    |> PzdbConnector.write(uri(tenant_uuid, did), [row])
+    # Beacon CMS: record only real successes
+    |> beacon_track(did, "profile_created", attrs)
   end
 
   @doc "Returns the profile content as a JSON binary."
@@ -55,8 +58,19 @@ defmodule Przma.Vault.Profile do
         updated_at: System.os_time(:microsecond)
       })
 
-    PzdbConnector.upsert(actor, uri(tenant_uuid, did), [row], [:did])
+    actor
+    |> PzdbConnector.upsert(uri(tenant_uuid, did), [row], [:did])
+    |> beacon_track(did, "profile_updated", attrs)
   end
+
+  # Passes the write result through unchanged; on :ok tells Beacon CMS which
+  # fields changed (field NAMES only — never the values).
+  defp beacon_track(:ok, did, event, attrs) do
+    Przma.Beacon.track(did, event, %{fields: attrs |> Map.keys() |> Enum.map(&to_string/1)})
+    :ok
+  end
+
+  defp beacon_track(result, _did, _event, _attrs), do: result
 
   @spec uri(String.t(), String.t()) :: String.t()
   def uri(tenant_uuid, did) do

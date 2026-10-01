@@ -11,7 +11,10 @@ defmodule Przma.Application do
       # once at boot, caches it, refetches on a verify failure (key
       # rotation). See lib/przma/auth/jwks_cache.ex.
       Przma.Auth.JwksCache,
-      Przma.CommonsCas.Repo
+      Przma.CommonsCas.Repo,
+      # Beacon CMS admin — isolated branch. Starts nothing unless
+      # BEACON_ENABLED=true and never restarts the processes above.
+      Przma.Beacon.Supervisor
     ]
 
     opts = [strategy: :one_for_one, name: Przma.Supervisor]

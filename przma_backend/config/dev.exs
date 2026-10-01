@@ -9,4 +9,11 @@ config :przma, PRZMAWeb.Endpoint,
       "dev_only_secret_key_base_at_least_64_bytes_long_padding_padding_pad",
   watchers: []
 
+config :przma, PRZMAWeb.Beacon.AdminEndpoint,
+  check_origin: false,
+  debug_errors: true,
+  secret_key_base:
+    System.get_env("SECRET_KEY_BASE") ||
+      "dev_only_secret_key_base_at_least_64_bytes_long_padding_padding_pad"
+
 config :logger, :console, format: "[$level] $message\n"
