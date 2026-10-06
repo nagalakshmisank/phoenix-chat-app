@@ -67,6 +67,26 @@ defmodule Przma.Vault.PzdbConnector do
     end
   end
 
+  @doc """
+  Ordered, paged read of a table (see DocStoreAdapter.query_range/2 for
+  the options). Same authorization chain as read_many/2. Only adapters
+  that export query_range/2 support it (CouchDB does; Lance does not).
+  """
+  @spec read_range(actor(), uri_string :: String.t(), opts :: keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_range(actor, uri_string, opts \\ []) do
+    with {:ok, uri} <- PzdbUri.parse(uri_string),
+         :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
+      adapter = BackendRouter.adapter_for(uri)
+
+      if Code.ensure_loaded?(adapter) and function_exported?(adapter, :query_range, 2) do
+        adapter.query_range(uri, opts)
+      else
+        {:error, :range_read_not_supported}
+      end
+    end
+  end
+
   @spec write(actor(), uri_string :: String.t(), rows :: [map()] | binary()) ::
           :ok | {:error, term()}
   def write(actor, uri_string, rows) do

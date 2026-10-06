@@ -24,7 +24,29 @@ config :przma, Przma.CommonsCas.Repo, priv: "priv/commons_cas"
 #   vault/profile   -> vault:private:profile
 #   files/index     -> files:{private|personal|public}:index:{file_id}
 #   files/cas_meta  -> files:cas:cas_meta:{sha256}
-config :przma, :doc_store_tables, [{"vault", "profile"}, {"files", "index"}, {"files", "cas_meta"}]
+config :przma, :doc_store_tables, [
+  {"vault", "profile"},
+  {"files", "index"},
+  {"files", "cas_meta"},
+  # chat service (inbox / outbox / chat list)
+  {"chat", "inbox"},
+  {"chat", "outbox"},
+  {"chat", "threads"},
+  # circle service
+  {"circle", "circles"},
+  {"circle", "members"},
+  {"circle", "memberships"},
+  {"circle", "pins"},
+  {"circle", "followers"},
+  {"circle", "invites"},
+  {"circle", "index"},
+  # contacts, follows, shared account directory, notification settings
+  {"social", "contacts"},
+  {"social", "contact_types"},
+  {"social", "following"},
+  {"social", "accounts"},
+  {"social", "notification_settings"}
+]
 
 # Tables that also get a read-only JSON copy (*.couch.json) in S3.
 # Files and CAS documents are intentionally NOT mirrored.

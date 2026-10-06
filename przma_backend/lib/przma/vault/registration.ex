@@ -30,6 +30,9 @@ defmodule Przma.Vault.Registration do
 
     case SpaceProvisioner.provision_all(actor, tenant_uuid, attrs, tier: identity[:storage_tier] || 1) do
       :ok ->
+        # Shared account directory: lets other users find this DID (add
+        # contact, send message). Best-effort — never fails registration.
+        Przma.Social.Directory.put_account(did, tenant_uuid, attrs)
         {:ok, %{status: "registered", did: did, gid: tenant_uuid, database: CouchDbName.from_did(did)}}
 
       {:error, _} = err ->

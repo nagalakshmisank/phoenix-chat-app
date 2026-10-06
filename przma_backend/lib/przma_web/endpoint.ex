@@ -1,5 +1,9 @@
 defmodule PRZMAWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :przma
+  use Absinthe.Phoenix.Endpoint
+
+  # Websocket for GraphQL subscriptions. Connect with ?token=<Keycloak access token>.
+  socket "/socket", PRZMAWeb.UserSocket, websocket: true, longpoll: false
 
   @session_options [
     store: :cookie,

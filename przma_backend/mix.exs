@@ -47,6 +47,8 @@ defmodule Przma.MixProject do
       {:open_api_spex, "~> 3.18"},
       {:absinthe, "~> 1.7"},
       {:absinthe_plug, "~> 1.5"},
+      # GraphQL subscriptions over Phoenix channels (live notifications).
+      {:absinthe_phoenix, "~> 2.0"},
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},

@@ -30,7 +30,12 @@ defmodule PRZMAWeb.Plugs.KeycloakAuth do
     end
   end
 
-  defp verify(token) do
+  @doc """
+  Verifies a Keycloak access token and returns its claims. Public so the
+  websocket (PRZMAWeb.UserSocket) checks tokens exactly the way HTTP does.
+  """
+  @spec verify(String.t()) :: {:ok, map()} | {:error, atom()}
+  def verify(token) do
     with {:ok, jwk} <- Przma.Auth.JwksCache.current_jwk(),
          {true, %JOSE.JWT{fields: claims}, _} <- JOSE.JWT.verify_strict(jwk, ["RS256"], token) do
       if claims["exp"] > System.system_time(:second) do

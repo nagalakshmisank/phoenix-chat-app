@@ -88,6 +88,58 @@ defmodule Przma.Vault.DocStoreAdapter do
     end
   end
 
+  @doc """
+  Ordered, paged read of one table (NOT part of the NifAdapter behaviour —
+  PzdbConnector.read_range/3 calls it only when the adapter exports it).
+  Record ids sort as plain text, so tables that need time order use
+  time-sortable ids (see Przma.Social.Key).
+
+  Options:
+    :prefix      only record ids starting with this (e.g. one chat thread)
+    :after       record id — return ids greater than this (exclusive)
+    :before      record id — return ids smaller than this (exclusive)
+    :limit       default 200, capped at #{1000}
+    :descending  true = highest id first (newest first)
+
+  Returns the same JSON-array shape as query_many/1.
+  """
+  def query_range(%PzdbUri{namespace: ns, did: did} = uri, opts) do
+    with {:ok, table_id} <- CouchDocId.from_uri(uri, nil) do
+      base = table_id <> ":"
+      prefix = base <> to_string(Keyword.get(opts, :prefix, ""))
+      limit = opts |> Keyword.get(:limit, 200) |> min(@list_limit) |> max(1)
+      descending = Keyword.get(opts, :descending, false)
+      after_id = Keyword.get(opts, :after)
+      before_id = Keyword.get(opts, :before)
+
+      low = if after_id, do: base <> after_id, else: prefix
+      high = if before_id, do: base <> before_id, else: prefix <> "\u{FFF0}"
+      {startkey, endkey} = if descending, do: {high, low}, else: {low, high}
+      excluded = Enum.reject([after_id, before_id], &is_nil/1)
+
+      # +2: the two bounds are inclusive in CouchDB but exclusive here.
+      case CouchClient.list_range(CouchDbName.from_did(did), ns, startkey, endkey,
+             limit: limit + 2,
+             descending: descending
+           ) do
+        {:ok, docs} ->
+          rows =
+            docs
+            |> Enum.map(&to_fields(&1, base))
+            |> Enum.reject(&(&1["id"] in excluded))
+            |> Enum.take(limit)
+
+          {:ok, Jason.encode!(rows)}
+
+        {:error, :not_found} ->
+          {:ok, "[]"}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
   @impl true
   def query_since(%PzdbUri{}, _since), do: {:error, :not_implemented}
 

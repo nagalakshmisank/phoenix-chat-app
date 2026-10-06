@@ -130,6 +130,31 @@ defmodule Przma.Storage.CouchClient do
     end
   end
 
+  @doc """
+  Documents in `partition` between two _id keys, sorted by _id. Used for
+  paged, ordered reads (a chat thread, newest first). `startkey` and
+  `endkey` are full document ids; with `descending: true` pass the HIGH
+  key as `startkey` and the LOW key as `endkey` (CouchDB's own rule).
+  Returns {:error, :not_found} when the database does not exist.
+  """
+  @spec list_range(db(), String.t(), String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_range(db, partition, startkey, endkey, opts \\ []) do
+    query =
+      URI.encode_query(%{
+        "startkey" => Jason.encode!(startkey),
+        "endkey" => Jason.encode!(endkey),
+        "include_docs" => "true",
+        "descending" => to_string(Keyword.get(opts, :descending, false)),
+        "limit" => Integer.to_string(Keyword.get(opts, :limit, 200))
+      })
+
+    case request(:get, db_path(db) <> "/_partition/" <> encode(partition) <> "/_all_docs?" <> query, nil) do
+      {:ok, 200, %{"rows" => rows}} -> {:ok, for(%{"doc" => doc} <- rows, is_map(doc), do: doc)}
+      {:ok, 404, _} -> {:error, :not_found}
+      other -> to_error(other)
+    end
+  end
+
   # ── internal ─────────────────────────────────────────────────────────
 
   defp db_path(db), do: "/" <> encode(db)

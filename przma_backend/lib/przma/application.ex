@@ -4,9 +4,16 @@ defmodule Przma.Application do
 
   @impl true
   def start(_type, _args) do
+    # Small in-memory cache for the social services (account directory
+    # lookups). Owned by the application process, so it lives as long as
+    # the app does.
+    Przma.Social.Cache.init()
+
     children = [
       {Phoenix.PubSub, name: Przma.PubSub},
       PRZMAWeb.Endpoint,
+      # GraphQL subscriptions (notificationReceived, circleEvent).
+      {Absinthe.Subscription, PRZMAWeb.Endpoint},
       # JWKS cache for KeycloakAuth — fetches Keycloak's signing key
       # once at boot, caches it, refetches on a verify failure (key
       # rotation). See lib/przma/auth/jwks_cache.ex.
