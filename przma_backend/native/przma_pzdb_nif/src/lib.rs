@@ -41,6 +41,8 @@ fn rt() -> &'static Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // Lance futures are very deep; give worker threads a big stack.
+            .thread_stack_size(16 * 1024 * 1024)
             .build()
             .expect("tokio runtime")
     })
@@ -862,6 +864,257 @@ fn pzdb_read_many(
         let records = batches_to_json(&batches);
         let total = records.len();
         Ok(json!({"status": "ok", "records": records, "total": total}).to_string())
+    })
+}
+
+// ── DOC STORE (LanceDB replacement for CouchDB) ─────────────────────────────
+//
+// Used by Przma.Vault.LanceDocAdapter for every {namespace, table} listed in
+// config :przma, :doc_store_tables (profile, files index, cas_meta, chat,
+// circle, social …). These tables do NOT use the typed schemas above: every
+// doc table has the SAME 11-column schema, and the free-form document fields
+// travel as one JSON string in `doc_json`. That keeps CouchDB's flexibility
+// (services can add fields without a Rust change) while the envelope columns
+// (id, did, namespace, …) stay real, filterable Lance columns.
+//
+// Location is the same rule as every other pzdb table (built in Elixir):
+//   {base}/{did}/{namespace}/{space}/{table}.lance
+//
+// Writes are serialised per user by Przma.Storage.DocWriter (Elixir), because
+// Lance on S3 has no safe multi-writer commit. Do not call these NIFs from
+// anywhere else.
+
+use lancedb::table::{CompactionOptions, Duration as LanceDuration, OptimizeAction};
+
+// Doc NIFs run their work ON a tokio worker thread (16 MB stack, see rt()),
+// not on the BEAM dirty-scheduler thread that called the NIF: that thread's
+// stack is small and Lance's deep futures overflow it (segfault), especially
+// in debug builds. Errors travel as String because NifError is not Send.
+type DocResult<T> = Result<T, String>;
+
+fn derr<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+fn run_doc<F>(fut: F) -> NifResult<String>
+where
+    F: std::future::Future<Output = DocResult<String>> + Send + 'static,
+{
+    match rt().block_on(rt().spawn(fut)) {
+        Ok(Ok(json)) => Ok(json),
+        Ok(Err(e)) => Err(err(e)),
+        Err(join_error) => Err(err(format!("doc task failed: {}", join_error))),
+    }
+}
+
+const DOC_SCHEMA_MARKER: &str = "doc_json";
+
+fn doc_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",         DataType::Utf8,  false), // record id (single-doc tables: the did)
+        Field::new("did",        DataType::Utf8,  false), // owner
+        Field::new("gid",        DataType::Utf8,  true),  // tenant uuid
+        Field::new("namespace",  DataType::Utf8,  false),
+        Field::new("space",      DataType::Utf8,  false),
+        Field::new("table_name", DataType::Utf8,  false),
+        Field::new("pzdb_uri",   DataType::Utf8,  true),
+        Field::new("doc_ver",    DataType::Int64, false), // replaces CouchDB _rev
+        Field::new("created_at", DataType::Int64, false), // microseconds
+        Field::new("updated_at", DataType::Int64, false), // microseconds
+        Field::new("doc_json",   DataType::Utf8,  false), // all other fields, JSON object
+    ])))
+}
+
+fn json_to_doc_batch(rows: &[Value]) -> DocResult<RecordBatch> {
+    fn s(v: &Value, k: &str) -> String {
+        v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+    }
+    fn so(v: &Value, k: &str) -> Option<String> {
+        v.get(k).and_then(Value::as_str).map(str::to_string)
+    }
+    fn i(v: &Value, k: &str) -> i64 {
+        v.get(k).and_then(Value::as_i64).unwrap_or(0)
+    }
+    fn doc(v: &Value) -> String {
+        match v.get("doc_json") {
+            Some(Value::String(js)) => js.clone(),
+            Some(other) => other.to_string(),
+            None => "{}".to_string(),
+        }
+    }
+
+    for r in rows {
+        if s(r, "id").is_empty() {
+            return Err("doc row without id".to_string());
+        }
+    }
+
+    let col = |f: fn(&Value, &str) -> String, k: &str| -> Arc<StringArray> {
+        Arc::new(StringArray::from(rows.iter().map(|r| f(r, k)).collect::<Vec<_>>()))
+    };
+    let colo = |k: &str| -> Arc<StringArray> {
+        Arc::new(StringArray::from(rows.iter().map(|r| so(r, k)).collect::<Vec<_>>()))
+    };
+    let coli = |k: &str| -> Arc<Int64Array> {
+        Arc::new(Int64Array::from(rows.iter().map(|r| i(r, k)).collect::<Vec<_>>()))
+    };
+
+    RecordBatch::try_new(
+        doc_schema(),
+        vec![
+            col(s, "id"),
+            col(s, "did"),
+            colo("gid"),
+            col(s, "namespace"),
+            col(s, "space"),
+            col(s, "table_name"),
+            colo("pzdb_uri"),
+            coli("doc_ver"),
+            coli("created_at"),
+            coli("updated_at"),
+            Arc::new(StringArray::from(rows.iter().map(doc).collect::<Vec<_>>())),
+        ],
+    )
+    .map_err(derr)
+}
+
+// Opens {dir}/{table}.lance. Missing table: created (create = true) or None.
+// An existing table WITHOUT the doc schema (e.g. an old profile.lance written
+// with profile_schema) is reported as "schema_mismatch", never overwritten.
+async fn open_doc_table(dir: &str, table: &str, create: bool) -> DocResult<Option<Table>> {
+    let conn = connect(dir).execute().await.map_err(derr)?;
+    let t = match conn.open_table(table).execute().await {
+        Ok(t) => t,
+        Err(lancedb::Error::TableNotFound { .. }) if create => conn
+            .create_empty_table(table, doc_schema())
+            .execute()
+            .await
+            .map_err(derr)?,
+        Err(lancedb::Error::TableNotFound { .. }) => return Ok(None),
+        Err(e) => return Err(derr(e)),
+    };
+
+    let schema = t.schema().await.map_err(derr)?;
+    if schema.field_with_name(DOC_SCHEMA_MARKER).is_err() {
+        return Err(format!(
+            "schema_mismatch: {}/{}.lance exists but is not a doc-store table",
+            dir, table
+        ));
+    }
+    Ok(Some(t))
+}
+
+/// Upsert rows (JSON array) by `id` in ONE commit (merge_insert).
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_doc_upsert(base_path: String, table_path: String, rows_json: String) -> NifResult<String> {
+    run_doc(async move {
+        let rows: Vec<Value> = serde_json::from_str(&rows_json).map_err(derr)?;
+        if rows.is_empty() {
+            return Ok(json!({"status": "ok", "count": 0}).to_string());
+        }
+        let table = open_doc_table(&base_path, &table_path, true)
+            .await?
+            .ok_or_else(|| "table could not be created".to_string())?;
+
+        let batch = json_to_doc_batch(&rows)?;
+        let count = batch.num_rows();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], doc_schema());
+
+        // Empty table: plain append. Otherwise: real upsert on `id`.
+        if table.count_rows(None).await.map_err(derr)? == 0 {
+            table.add(reader).execute().await.map_err(derr)?;
+        } else {
+            let mut builder = table.merge_insert(&["id"]);
+            builder.when_matched_update_all(None).when_not_matched_insert_all();
+            builder.execute(Box::new(reader)).await.map_err(derr)?;
+        }
+
+        let version = table.version().await.map_err(derr)?;
+        Ok(json!({"status": "ok", "count": count, "version": version}).to_string())
+    })
+}
+
+/// Rows matching an SQL filter ("" = all), at most `limit`. Missing table => [].
+/// Rows come back UNORDERED — the Elixir side sorts by id.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_doc_query(base_path: String, table_path: String, filter: String, limit: u64) -> NifResult<String> {
+    run_doc(async move {
+        let table = match open_doc_table(&base_path, &table_path, false).await? {
+            Some(t) => t,
+            None => return Ok(json!({"status": "ok", "records": [], "total": 0}).to_string()),
+        };
+
+        let mut q = table.query().limit(limit as usize);
+        if !filter.trim().is_empty() {
+            q = q.only_if(filter);
+        }
+        let batches: Vec<RecordBatch> =
+            q.execute().await.map_err(derr)?.try_collect().await.map_err(derr)?;
+
+        let records = batches_to_json(&batches);
+        let total = records.len();
+        Ok(json!({"status": "ok", "records": records, "total": total}).to_string())
+    })
+}
+
+/// Compacts small files and prunes versions older than `keep_hours`.
+/// Run through DocWriter so it never overlaps a write to the same table.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_doc_optimize(base_path: String, table_path: String, keep_hours: u64) -> NifResult<String> {
+    run_doc(async move {
+        let table = match open_doc_table(&base_path, &table_path, false).await? {
+            Some(t) => t,
+            None => return Ok(json!({"status": "ok", "skipped": "no_table"}).to_string()),
+        };
+
+        let compaction = table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(derr)?
+            .compaction;
+
+        let older_than = LanceDuration::try_hours(keep_hours as i64)
+            .ok_or_else(|| "invalid keep_hours".to_string())?;
+        let prune = table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(older_than),
+                delete_unverified: Some(false),
+                error_if_tagged_old_versions: Some(false),
+            })
+            .await
+            .map_err(derr)?
+            .prune;
+
+        let version = table.version().await.map_err(derr)?;
+        Ok(json!({
+            "status": "ok",
+            "version": version,
+            "fragments_removed": compaction.as_ref().map(|c| c.fragments_removed).unwrap_or(0),
+            "fragments_added":   compaction.as_ref().map(|c| c.fragments_added).unwrap_or(0),
+            "files_removed":     compaction.as_ref().map(|c| c.files_removed).unwrap_or(0),
+            "files_added":       compaction.as_ref().map(|c| c.files_added).unwrap_or(0),
+            "old_versions":      prune.as_ref().map(|p| p.old_versions).unwrap_or(0),
+            "bytes_removed":     prune.as_ref().map(|p| p.bytes_removed).unwrap_or(0),
+        })
+        .to_string())
+    })
+}
+
+/// Row count + current version of one doc table (for tests and monitoring).
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_doc_stats(base_path: String, table_path: String) -> NifResult<String> {
+    run_doc(async move {
+        match open_doc_table(&base_path, &table_path, false).await? {
+            None => Ok(json!({"status": "ok", "exists": false, "rows": 0, "version": 0}).to_string()),
+            Some(t) => {
+                let rows = t.count_rows(None).await.map_err(derr)?;
+                let version = t.version().await.map_err(derr)?;
+                Ok(json!({"status": "ok", "exists": true, "rows": rows, "version": version}).to_string())
+            }
+        }
     })
 }
 

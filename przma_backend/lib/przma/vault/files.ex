@@ -11,15 +11,14 @@ defmodule Przma.Vault.Files do
   Where everything lands (user kc_user1):
 
       S3       perkeep/did_przma_kc_user1/files/cas/ab/ab12…ef     original bytes, once per hash
-      CouchDB  przma_did_przma_kc_user1
-                 files:{space}:index:{file_id}                      one doc per uploaded file
-                 files:cas:cas_meta:{sha256}                        one doc per unique hash
+      Lance    perkeep/did_przma_kc_user1/files/{space}/index.lance  one row per uploaded file
+               perkeep/did_przma_kc_user1/files/cas/cas_meta.lance   one row per unique hash
       Postgres przma_commons_cas.cas_table                          PUBLIC files only (did + hash)
 
   Upload order (upload/5), every step authorized via the pzdb URI:
     1. Cas.put/3          authorize (files, space) -> bytes to S3 (dedup by hash)
     2. CasMeta.record/6   CAS ledger doc: ref_count +1 (atomic), referenced_spaces
-    3. index document     file metadata in files:{space}:index:{file_id}
+    3. index row          file metadata in files/{space}/index.lance (id = file_id)
     4. public only        Przma.CommonsCas.Replicator -> Postgres cas_table
 
   The Postgres copy is best-effort (never fails the upload) but NOT

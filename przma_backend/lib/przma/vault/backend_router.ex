@@ -4,11 +4,11 @@ defmodule Przma.Vault.BackendRouter do
   parsed and authorized it. Authorization is identical for every
   backend; only the final storage call differs.
 
-      {namespace, table} in doc_store_tables  -> DocStoreAdapter (CouchDB + S3 mirror)
-      anything else                           -> NifAdapter.adapter() (Lance, untouched)
+      {namespace, table} in doc_store_tables  -> LanceDocAdapter (LanceDB doc tables in S3)
+      anything else                           -> NifAdapter.adapter() (LanceLinodeAdapter, untouched)
 
-  Current CouchDB tables: vault/profile, files/index, files/cas_meta.
-  Moving another service later means
+  Doc-store tables: see config :przma, :doc_store_tables (profile, files,
+  chat, circle, social). Moving another service later means
   adding its {namespace, table} here — or in config
   :przma, :doc_store_tables — not rewriting the service.
   """
@@ -27,5 +27,5 @@ defmodule Przma.Vault.BackendRouter do
 
   # Configurable so tests can swap in a fake adapter.
   @spec doc_store_adapter() :: module()
-  def doc_store_adapter, do: Application.get_env(:przma, :doc_store_adapter, Przma.Vault.DocStoreAdapter)
+  def doc_store_adapter, do: Application.get_env(:przma, :doc_store_adapter, Przma.Vault.LanceDocAdapter)
 end

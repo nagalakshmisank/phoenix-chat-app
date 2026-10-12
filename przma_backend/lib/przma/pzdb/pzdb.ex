@@ -55,6 +55,45 @@ defmodule PRZMA.PzDb do
     end
   end
 
+  # ── DOC STORE (used only by Przma.Vault.LanceDocAdapter) ──────────────────
+  #
+  # Same resolve/1 as write/query above, so a doc table lands next to every
+  # other pzdb table:  pzdb://{did}/{service}/{space}/{table}
+  #                 -> {global_base}/{did}/{service}/{space}/{table}.lance
+  # No backfill/2 here: doc tables use doc_schema (lib.rs), not files_schema.
+
+  @doc "Upsert doc rows (list of maps) by id in ONE Lance commit."
+  def doc_upsert(pzdb_table_uri, rows) when is_binary(pzdb_table_uri) and is_list(rows) do
+    {base, table} = resolve(pzdb_table_uri)
+
+    NIF.pzdb_doc_upsert(base, table, Jason.encode!(rows))
+    |> to_result()
+  end
+
+  @doc "Doc rows matching an SQL filter (\"\" = all), unordered, at most `limit`."
+  def doc_query(pzdb_table_uri, filter, limit) when is_binary(pzdb_table_uri) and is_binary(filter) do
+    {base, table} = resolve(pzdb_table_uri)
+
+    NIF.pzdb_doc_query(base, table, filter, limit)
+    |> to_result()
+  end
+
+  @doc "Compact small files and prune versions older than `keep_hours`."
+  def doc_optimize(pzdb_table_uri, keep_hours) when is_binary(pzdb_table_uri) and is_integer(keep_hours) do
+    {base, table} = resolve(pzdb_table_uri)
+
+    NIF.pzdb_doc_optimize(base, table, keep_hours)
+    |> to_result()
+  end
+
+  @doc "Row count and current version of a doc table (tests / monitoring)."
+  def doc_stats(pzdb_table_uri) when is_binary(pzdb_table_uri) do
+    {base, table} = resolve(pzdb_table_uri)
+
+    NIF.pzdb_doc_stats(base, table)
+    |> to_result()
+  end
+
   # ── PRIVATE ───────────────────────────────────────────────────────────────
 
   # pzdb://{did}/{service}/{space}/{table}/{record_id}

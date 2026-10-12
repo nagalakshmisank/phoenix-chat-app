@@ -41,17 +41,19 @@ config :przma, Przma.CommonsCas.Repo,
   password: System.get_env("COMMONS_CAS_PASSWORD", "PrzmaCommons@2026#Secure"),
   pool_size: 5
 
-# ── CouchDB (system of record for vault documents, per the ADR) ─────────
-# Credentials ONLY from env vars — never commit them. Do not put
-# user:password inside COUCHDB_URL; CouchClient sends a Basic auth header.
-config :przma, :couchdb,
-  url: System.get_env("COUCHDB_URL", "http://127.0.0.1:5985"),
-  username: System.get_env("COUCHDB_USER"),
-  password: System.get_env("COUCHDB_PASSWORD"),
-  timeout: String.to_integer(System.get_env("COUCHDB_TIMEOUT_MS", "15000"))
-
-# ── S3 JSON mirror of CouchDB docs (view-only copy next to .lance files) ─
-# s3://{bucket}/did_…/vault/private/profile.couch.json. Uses the :vault S3
-# settings above. CouchDB stays the source of truth.
-config :przma, :s3_mirror,
-  enabled: System.get_env("S3_MIRROR_ENABLED", "true") == "true"
+# ── LanceDB doc store (replaces CouchDB) ────────────────────────────────
+# Tables live in S3 under VAULT_BASE_PATH (see :vault_base_path above).
+# The Rust NIF reads the S3 credentials from the OS env:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT, AWS_DEFAULT_REGION
+config :przma, :lance_doc,
+  # max wait for a user's write queue (DocWriter) before the request fails
+  writer_timeout_ms: String.to_integer(System.get_env("LANCE_WRITER_TIMEOUT_MS", "30000")),
+  # a user's writer process stops after this long without writes
+  writer_idle_stop_ms: String.to_integer(System.get_env("LANCE_WRITER_IDLE_MS", "300000")),
+  # safety cap on rows read from one table in one query
+  query_max_rows: String.to_integer(System.get_env("LANCE_QUERY_MAX_ROWS", "100000")),
+  # LanceCompactor: minutes between passes (0 = off), writes needed per table,
+  # and how many hours of old versions to keep
+  compact_interval_min: String.to_integer(System.get_env("LANCE_COMPACT_INTERVAL_MIN", "30")),
+  compact_min_writes: String.to_integer(System.get_env("LANCE_COMPACT_MIN_WRITES", "50")),
+  keep_versions_hours: String.to_integer(System.get_env("LANCE_KEEP_VERSIONS_HOURS", "1"))

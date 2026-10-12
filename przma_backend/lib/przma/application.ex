@@ -18,7 +18,12 @@ defmodule Przma.Application do
       # once at boot, caches it, refetches on a verify failure (key
       # rotation). See lib/przma/auth/jwks_cache.ex.
       Przma.Auth.JwksCache,
-      Przma.CommonsCas.Repo
+      Przma.CommonsCas.Repo,
+      # LanceDB doc store: one writer process per user (started on demand)
+      # and the background compactor. See lib/przma/storage/.
+      {Registry, keys: :unique, name: Przma.Storage.DocWriterRegistry},
+      {DynamicSupervisor, name: Przma.Storage.DocWriterSupervisor, strategy: :one_for_one},
+      Przma.Storage.LanceCompactor
     ]
 
     opts = [strategy: :one_for_one, name: Przma.Supervisor]

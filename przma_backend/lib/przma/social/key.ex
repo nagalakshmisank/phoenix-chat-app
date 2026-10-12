@@ -1,7 +1,7 @@
 defmodule Przma.Social.Key do
   @moduledoc """
-  Builds every id the social services store. CouchDB record ids may only
-  contain A-Z a-z 0-9 _ - (see CouchDocId), so a DID ("did:przma:alice")
+  Builds every id the social services store. Record ids may only
+  contain A-Z a-z 0-9 _ - (see Przma.Storage.DocKey), so a DID ("did:przma:alice")
   can never be used as-is.
 
     did_key/1      did:przma:kc_user1 -> "did_przma_kc_user1"

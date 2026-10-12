@@ -1,7 +1,7 @@
 defmodule PRZMAWeb.Graphql.Types.ProfileTypes do
   use Absinthe.Schema.Notation
 
-  @desc "User profile — stored in namespace vault, space private (CouchDB doc vault:private:profile)."
+  @desc "User profile — stored in namespace vault, space private (Lance table vault/private/profile.lance)."
   object :profile do
     field :did, :string
     field :email, :string

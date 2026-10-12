@@ -1,7 +1,7 @@
 defmodule PRZMAWeb.Graphql.Resolvers.ProfileResolver do
   @moduledoc """
   GraphQL profile resolvers. Every call goes Profile -> PzdbConnector
-  (pzdb URI, NamespacePolicy, PzdbAuthorization) -> DocStoreAdapter.
+  (pzdb URI, NamespacePolicy, PzdbAuthorization) -> LanceDocAdapter.
   """
   alias Przma.Vault.Profile
 

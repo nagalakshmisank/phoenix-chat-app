@@ -110,16 +110,14 @@ defmodule Przma.Vault.NamespacePolicy do
   def verb_for(namespace, operation), do: "vault.#{namespace}.#{operation}"
 
   @doc """
-  Every namespace this policy knows. Used by CouchDocId and tests so
+  Every namespace this policy knows. Used by DocKey and tests so
   the namespace list is never duplicated anywhere else.
   """
   @spec namespaces() :: [String.t()]
   def namespaces, do: @allowed_operations_by_namespace |> Map.keys() |> Enum.sort()
 
   @doc """
-  Namespaces whose ceiling includes `operation`. CouchDesign generates
-  CouchDB's validate_doc_update from namespaces_allowing(:write), so
-  CouchDB enforces exactly this policy as a second layer.
+  Namespaces whose ceiling includes `operation`.
   """
   @spec namespaces_allowing(:read | :write | :compact) :: [String.t()]
   def namespaces_allowing(operation) do

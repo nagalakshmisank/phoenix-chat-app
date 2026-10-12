@@ -36,17 +36,17 @@ defmodule PRZMAWeb.ApiSpec do
         then use the returned `access_token` here.
 
         ## Registration
-        `POST /registration/complete` (safe to repeat) creates the user's
-        CouchDB database `przma_{did}` and the profile document
-        `vault:private:profile`, and provisions the Lance `_meta` tables
-        for `public` and `professional` exactly as before.
+        `POST /registration/complete` (safe to repeat) writes the user's
+        profile to `{did}/vault/private/profile.lance` in S3 and provisions
+        the Lance `_meta` tables for `public` and `professional` exactly as
+        before.
 
         ## Storage
-        Profile: CouchDB document `vault:private:profile` (source of truth)
-        in the user's own database, plus a read-only JSON mirror in S3 at
-        `{did}/vault/private/profile.couch.json`. Every read/write goes
-        through the pzdb URI, NamespacePolicy and PzdbAuthorization.
-        Files and `_meta` still use Lance (unchanged).
+        All documents (profile, files, chat, circles, contacts) are LanceDB
+        tables in S3: `s3://perkeep/{did}/{namespace}/{space}/{table}.lance`.
+        Every read/write goes through the pzdb URI, NamespacePolicy and
+        PzdbAuthorization. Public-file CAS metadata is also copied to
+        Postgres (unchanged).
 
         The same operations are available in GraphQL at `/api/graphql`
         (`completeRegistration`, `profile`, `updateProfile`).
@@ -174,8 +174,10 @@ defmodule PRZMAWeb.ApiSpec do
         did:    %Schema{type: :string, example: "did:przma:keerthi"},
         gid:    %Schema{type: :string, description: "tenant_uuid, from the JWT sub claim",
                          example: "b656d159-9ad8-48f8-ae32-6969237e5fcc"},
-        database: %Schema{type: :string, description: "The user's CouchDB database",
-                          example: "przma_did_przma_keerthi"}
+        database: %Schema{type: :string, description: "The user's S3 folder (kept for compatibility)",
+                          example: "s3://perkeep/did_przma_keerthi/"},
+        storage_path: %Schema{type: :string, description: "The user's S3 folder",
+                              example: "s3://perkeep/did_przma_keerthi/"}
       }
     }
   end
@@ -198,7 +200,7 @@ defmodule PRZMAWeb.ApiSpec do
       properties: %{
         profile: %Schema{
           type: :object,
-          description: "Fields of the CouchDB document vault:private:profile.",
+          description: "Fields of the profile row in vault/private/profile.lance.",
           properties: %{
             did:          %Schema{type: :string, example: "did:przma:keerthi"},
             email:        %Schema{type: :string, nullable: true},

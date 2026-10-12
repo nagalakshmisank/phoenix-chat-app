@@ -1,10 +1,10 @@
 defmodule Przma.Vault.CasMeta do
   @moduledoc """
-  Per-user CAS (content-addressed storage) ledger — one CouchDB document
+  Per-user CAS (content-addressed storage) ledger — one Lance row
   per unique file hash, in the internal "cas" folder of the files service:
 
       pzdb://s3/{tenant}/{did}/files/cas/cas_meta
-        -> CouchDB  przma_{did} / files:cas:cas_meta:{sha256}
+        -> s3://perkeep/did_…/files/cas/cas_meta.lance, row id = {sha256}
 
   The bytes themselves are NOT here: Cas.put/3 stores them once per hash
   in S3 at {did}/files/cas/{shard}/{sha256}. This document describes that
@@ -16,8 +16,8 @@ defmodule Przma.Vault.CasMeta do
   with ref_count 2 and referenced_spaces ["private", "public"].
 
   ref_count is incremented ATOMICALLY: the row carries
-  "$inc" => %{"ref_count" => 1}, which DocStoreAdapter applies to the
-  current document under its _rev and retries on a CouchDB conflict —
+  "$inc" => %{"ref_count" => 1}, which LanceDocAdapter applies to the
+  current row inside the owner's DocWriter (one write at a time) —
   two simultaneous uploads of the same file both count.
 
   "cas" is owner-only (NamespacePolicy.internal_space?/1): no other user

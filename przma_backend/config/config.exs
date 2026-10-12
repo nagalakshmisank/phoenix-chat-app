@@ -19,11 +19,13 @@ config :przma, :vault_nif_adapter, Przma.Vault.LanceLinodeAdapter
 config :przma, ecto_repos: [Przma.CommonsCas.Repo]
 config :przma, Przma.CommonsCas.Repo, priv: "priv/commons_cas"
 
-# {namespace, table} pairs stored in CouchDB instead of Lance (see
-# Przma.Vault.BackendRouter). Everything else stays on Lance.
-#   vault/profile   -> vault:private:profile
-#   files/index     -> files:{private|personal|public}:index:{file_id}
-#   files/cas_meta  -> files:cas:cas_meta:{sha256}
+# {namespace, table} pairs stored in the LanceDB DOC STORE (see
+# Przma.Vault.BackendRouter + Przma.Vault.LanceDocAdapter). Each pair is one
+# .lance table per user and space, in S3:
+#   vault/profile   -> {base}/did_…/vault/private/profile.lance
+#   files/index     -> {base}/did_…/files/{private|personal|public}/index.lance
+#   files/cas_meta  -> {base}/did_…/files/cas/cas_meta.lance
+# Everything NOT listed here (e.g. public/_meta) stays on LanceLinodeAdapter.
 config :przma, :doc_store_tables, [
   {"vault", "profile"},
   {"files", "index"},
@@ -48,10 +50,7 @@ config :przma, :doc_store_tables, [
   {"social", "notification_settings"}
 ]
 
-# Tables that also get a read-only JSON copy (*.couch.json) in S3.
-# Files and CAS documents are intentionally NOT mirrored.
-config :przma, :s3_mirror_tables, [{"vault", "profile"}]
-config :przma, :doc_store_adapter, Przma.Vault.DocStoreAdapter
+config :przma, :doc_store_adapter, Przma.Vault.LanceDocAdapter
 
 config :logger, :console, format: "$time $metadata[$level] $message\n"
 

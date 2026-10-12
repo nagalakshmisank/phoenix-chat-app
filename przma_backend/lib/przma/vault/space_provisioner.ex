@@ -2,26 +2,25 @@ defmodule Przma.Vault.SpaceProvisioner do
   @moduledoc """
   Runs once after Keycloak registration (safe to re-run). Steps, in order:
 
-    1. CouchDB  — the user's ONE database (CouchVault):
-                  partitioned, q=1, admin-only, _design/przma (from
-                  NamespacePolicy), _design/folders, by-space index
-    2. Profile  — vault:private:profile via PzdbConnector (fields in CouchDB,
-                  JSON mirror in S3 at did_…/vault/private/profile.couch.json)
+    1. Storage  — LanceVault: checks the actor provisions only their OWN
+                  DID and that the S3 base path is configured (nothing is
+                  created up front — S3 has no real folders)
+    2. Profile  — vault/private/profile via PzdbConnector
+                  -> s3://…/did_…/vault/private/profile.lance (LanceDocAdapter)
     3. Lance    — public/professional "_meta" tables, exactly as before (untouched)
 
-  No marker/placeholder documents are created: a namespace/space "folder"
-  appears in CouchDB and S3 when its first real document is written
-  (e.g. vault:private:profile creates vault/private).
+  No marker/placeholder rows are created: a namespace/space "folder"
+  appears in S3 when its first real row is written
+  (e.g. the profile creates vault/private/profile.lance).
 
   Every DOCUMENT goes through PzdbConnector — pzdb URI, NamespacePolicy,
-  PzdbAuthorization. Step 1 creates the empty container only (no data)
-  and is bound to the actor's own DID.
+  PzdbAuthorization.
 
-  Re-running is harmless: the database is reused, and
-  {:error, :already_exists} from step 2 is treated as success.
+  Re-running is harmless: {:error, :already_exists} from step 2 is
+  treated as success.
   """
 
-  alias Przma.Storage.CouchVault
+  alias Przma.Storage.LanceVault
   alias Przma.Vault.{Profile, PzdbConnector, PzdbUri}
 
   @lance_meta_spaces ["public", "professional"]
@@ -30,7 +29,7 @@ defmodule Przma.Vault.SpaceProvisioner do
   def provision_all(%{did: did} = actor, tenant_uuid, profile_attrs, opts \\ []) do
     tier = Keyword.get(opts, :tier, 1)
 
-    with {:ok, _db} <- step(:couchdb, CouchVault.ensure_user_db(actor, did)),
+    with {:ok, _prefix} <- step(:vault_storage, LanceVault.ensure_user_vault(actor, did)),
          :ok <- step(:profile, ensure_profile(actor, tenant_uuid, Map.put(profile_attrs, :tier, tier))),
          :ok <- step(:lance_meta, provision_lance_meta(actor, tenant_uuid, did)) do
       :ok

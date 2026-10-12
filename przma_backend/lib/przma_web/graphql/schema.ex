@@ -9,7 +9,7 @@ defmodule PRZMAWeb.Graphql.Schema do
   import_types PRZMAWeb.Graphql.Types.SocialTypes
   alias PRZMAWeb.Graphql.Resolvers.{ProfileResolver, FilesResolver, RegistrationResolver}
 
-  # The chat / circle / social services return CouchDB documents, whose
+  # The chat / circle / social services return documents (decoded doc_json), whose
   # keys are strings ("thread_key"), while Absinthe's default looks a field
   # up by atom (:thread_key). This makes the default lookup accept both, so
   # those types need no per-field resolver. Existing atom-keyed results
@@ -75,7 +75,7 @@ defmodule PRZMAWeb.Graphql.Schema do
 
     @desc """
     Call once right after Keycloak sign-up (safe to repeat). Creates the
-    user's CouchDB database and the profile document vault:private:profile.
+    user's profile (s3://…/{did}/vault/private/profile.lance).
     """
     field :complete_registration, :registration_result do
       arg :nickname, :string

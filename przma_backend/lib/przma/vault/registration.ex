@@ -8,7 +8,7 @@ defmodule Przma.Vault.Registration do
   is the optional nickname.
   """
 
-  alias Przma.Storage.CouchDbName
+  alias Przma.Storage.LanceDocPath
   alias Przma.Vault.SpaceProvisioner
 
   @type identity :: %{
@@ -33,7 +33,10 @@ defmodule Przma.Vault.Registration do
         # Shared account directory: lets other users find this DID (add
         # contact, send message). Best-effort — never fails registration.
         Przma.Social.Directory.put_account(did, tenant_uuid, attrs)
-        {:ok, %{status: "registered", did: did, gid: tenant_uuid, database: CouchDbName.from_did(did)}}
+        # `database` is kept (same key the frontend already reads); it now
+        # holds the user's S3 folder instead of a CouchDB database name.
+        prefix = LanceDocPath.user_prefix(did)
+        {:ok, %{status: "registered", did: did, gid: tenant_uuid, database: prefix, storage_path: prefix}}
 
       {:error, _} = err ->
         err

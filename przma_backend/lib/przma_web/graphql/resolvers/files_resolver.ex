@@ -10,9 +10,9 @@ defmodule PRZMAWeb.Graphql.Resolvers.FilesResolver do
   for anything beyond small files — the client fetches straight from
   S3 with the returned URL instead. See Cas.presigned_get_url/4.
 
-  STORAGE: file metadata and the CAS ledger are CouchDB documents
-  (files:{space}:index:{file_id}, files:cas:cas_meta:{hash}) reached
-  through PzdbConnector -> BackendRouter -> DocStoreAdapter. Bytes are
+  STORAGE: file metadata and the CAS ledger are Lance rows
+  (files/{space}/index.lance, files/cas/cas_meta.lance) reached
+  through PzdbConnector -> BackendRouter -> LanceDocAdapter. Bytes are
   in S3 ({did}/files/cas/…). Public uploads are also copied to Postgres;
   the upload results report that as `commons`.
   """

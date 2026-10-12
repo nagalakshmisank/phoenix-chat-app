@@ -36,4 +36,21 @@ defmodule PRZMA.PzDb.NIF do
 
   def pzdb_cache_invalidate(_base_path, _table_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # ── Doc store (LanceDocAdapter only — replaces CouchDB) ─────────────────
+  # Every doc table shares one schema (doc_schema in lib.rs); fields travel
+  # as JSON in the `doc_json` column. Writes must go through
+  # Przma.Storage.DocWriter (one writer per user).
+
+  def pzdb_doc_upsert(_base_path, _table_path, _rows_json),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_doc_query(_base_path, _table_path, _filter, _limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_doc_optimize(_base_path, _table_path, _keep_hours),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_doc_stats(_base_path, _table_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

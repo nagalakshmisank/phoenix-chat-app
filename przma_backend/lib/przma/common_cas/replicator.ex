@@ -5,7 +5,7 @@ defmodule Przma.CommonsCas.Replicator do
 
   Called by Przma.Vault.Files for all three upload paths (upload/5,
   upload_blob/4, sync_record/5), only for space "public", and only
-  after the CouchDB writes succeeded — so it needs no authorization of
+  after the Lance doc writes succeeded — so it needs no authorization of
   its own.
 
   WHY THE LANCE VERSION NEVER WROTE A ROW — fixed here:

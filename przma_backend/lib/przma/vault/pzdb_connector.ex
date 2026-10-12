@@ -13,10 +13,10 @@ defmodule Przma.Vault.PzdbConnector do
   simpler, and correct until/unless a real per-DID write-serialization
   GenServer is confirmed to exist and reintroduced deliberately.
 
-  BACKEND ROUTING (CouchDB phase): after parse + authorize, the adapter
+  BACKEND ROUTING (LanceDB doc store): after parse + authorize, the adapter
   comes from BackendRouter.adapter_for/1 instead of the single global
-  NifAdapter.adapter(). vault/profile goes to DocStoreAdapter
-  (CouchDB + S3 JSON mirror); everything else still goes
+  NifAdapter.adapter(). doc_store_tables go to LanceDocAdapter
+  (LanceDB doc tables in S3); everything else still goes
   to the Lance adapter, unchanged. Authorization runs identically for
   both — no backend is reachable without passing it first.
   """
@@ -68,9 +68,9 @@ defmodule Przma.Vault.PzdbConnector do
   end
 
   @doc """
-  Ordered, paged read of a table (see DocStoreAdapter.query_range/2 for
+  Ordered, paged read of a table (see LanceDocAdapter.query_range/2 for
   the options). Same authorization chain as read_many/2. Only adapters
-  that export query_range/2 support it (CouchDB does; Lance does not).
+  that export query_range/2 support it (LanceDocAdapter does; LanceLinodeAdapter does not).
   """
   @spec read_range(actor(), uri_string :: String.t(), opts :: keyword()) ::
           {:ok, binary()} | {:error, term()}

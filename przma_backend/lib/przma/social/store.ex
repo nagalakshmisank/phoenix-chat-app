@@ -18,7 +18,7 @@ defmodule Przma.Social.Store do
 
   No resolver calls this module directly.
 
-  Field names to avoid in `fields` (DocStoreAdapter sets or drops them):
+  Field names to avoid in `fields` (LanceDocAdapter sets or drops them):
   id, tier, type, namespace, space, table, did, gid, created_at, updated_at.
   """
 
@@ -53,7 +53,7 @@ defmodule Przma.Social.Store do
 
   @doc """
   Ordered list of a table's documents. Options: :prefix, :after, :before,
-  :limit, :descending (see DocStoreAdapter.query_range/2) and :space.
+  :limit, :descending (see LanceDocAdapter.query_range/2) and :space.
   """
   @spec list(did(), String.t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def list(did, namespace, table, opts \\ []) do

@@ -6,12 +6,9 @@ defmodule Przma.Vault.Profile do
 
   Every call goes through PzdbConnector (parse -> NamespacePolicy ->
   PzdbAuthorization -> BackendRouter). BackendRouter sends vault/profile
-  to DocStoreAdapter, which stores:
+  to LanceDocAdapter, which stores ONE row (id = did) in:
 
-      CouchDB  przma_did_… / vault:private:profile   (the profile fields)
-      S3       did_…/vault/private/profile.couch.json (read-only JSON mirror)
-
-  This replaces profile.lance for NEW writes. Lance code is untouched.
+      s3://perkeep/did_…/vault/private/profile.lance   (doc_schema, fields in doc_json)
 
   `id` is set to `did` — one profile per user. `id` and `tier` are
   bookkeeping and are never stored as profile fields.

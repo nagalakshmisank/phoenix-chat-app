@@ -7,23 +7,28 @@ defmodule Przma.Social.Directory do
       circle:public:invites:{invite_code}  invite code -> circle id + owner
       circle:public:index:{circle_id}      public circles (discovery)
 
-  It is an ordinary CouchDB database created through CouchVault, owned by
-  a reserved system DID that can never be a Keycloak username, so it gets
-  the same partitioning, security and validate_doc_update as a user
-  database. Its name is `Przma.Social.Directory.database/0`.
+  It is stored exactly like a user's data — LanceDB tables in S3 under a
+  reserved system DID that can never be a Keycloak username:
+
+      s3://perkeep/did_przma-system_directory/social/public/accounts.lance
+      s3://perkeep/did_przma-system_directory/circle/public/invites.lance
+      s3://perkeep/did_przma-system_directory/circle/public/index.lance
+
+  Its S3 folder is `Przma.Social.Directory.database/0`. All writes to it
+  share ONE DocWriter (the system DID), so they are applied one at a time.
   """
 
   require Logger
 
   alias Przma.Social.{Cache, Key, Store}
-  alias Przma.Storage.{CouchDbName, CouchVault}
+  alias Przma.Storage.{LanceDocPath, LanceVault}
   alias Przma.Vault.{Profile, PzdbConnector}
 
   @did "did:przma-system:directory"
   @gid "system"
 
   def did, do: @did
-  def database, do: CouchDbName.from_did(@did)
+  def database, do: LanceDocPath.user_prefix(@did)
 
   # ── accounts ─────────────────────────────────────────────────────────
 
@@ -178,7 +183,7 @@ defmodule Przma.Social.Directory do
         :ok
 
       :miss ->
-        with {:ok, _db} <- CouchVault.ensure_user_db(%{did: @did}, @did) do
+        with {:ok, _prefix} <- LanceVault.ensure_user_vault(%{did: @did}, @did) do
           Cache.put(:directory_ready, true)
           :ok
         end
