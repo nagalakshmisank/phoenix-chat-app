@@ -59,7 +59,14 @@ defmodule Przma.Storage.LanceCompactor do
   @spec compact_table(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def compact_table(did, table_uri) do
     keep = cfg(:keep_versions_hours, 1)
-    DocWriter.run(did, fn -> PRZMA.PzDb.doc_optimize(table_uri, keep) end)
+
+    # Search tables (pzdb://did/search/…) have the vector schema, not the doc schema.
+    optimize =
+      if String.contains?(table_uri, "/search/"),
+        do: &PRZMA.PzDb.vec_optimize/2,
+        else: &PRZMA.PzDb.doc_optimize/2
+
+    DocWriter.run(did, fn -> optimize.(table_uri, keep) end)
   end
 
   # ── GenServer ────────────────────────────────────────────────────────

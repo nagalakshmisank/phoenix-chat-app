@@ -23,7 +23,9 @@ defmodule Przma.Application do
       # and the background compactor. See lib/przma/storage/.
       {Registry, keys: :unique, name: Przma.Storage.DocWriterRegistry},
       {DynamicSupervisor, name: Przma.Storage.DocWriterSupervisor, strategy: :one_for_one},
-      Przma.Storage.LanceCompactor
+      Przma.Storage.LanceCompactor,
+      # Vector search: background indexing tasks (Przma.Search.Indexer).
+      {Task.Supervisor, name: Przma.Search.TaskSupervisor}
     ]
 
     opts = [strategy: :one_for_one, name: Przma.Supervisor]

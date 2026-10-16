@@ -85,6 +85,19 @@ defmodule PRZMAWeb.Router do
     patch "/profile",
           ProfileController,
           :update
+
+    # Vector / keyword search over the logged-in user's own content
+    get "/search",
+        SearchController,
+        :search
+
+    post "/search/index",
+         SearchController,
+         :index
+
+    get "/search/stats",
+        SearchController,
+        :stats
   end
 
   # ------------------------------------------------------------

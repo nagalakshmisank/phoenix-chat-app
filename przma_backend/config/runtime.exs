@@ -57,3 +57,12 @@ config :przma, :lance_doc,
   compact_interval_min: String.to_integer(System.get_env("LANCE_COMPACT_INTERVAL_MIN", "30")),
   compact_min_writes: String.to_integer(System.get_env("LANCE_COMPACT_MIN_WRITES", "50")),
   keep_versions_hours: String.to_integer(System.get_env("LANCE_KEEP_VERSIONS_HOURS", "1"))
+
+# ── Vector search (Przma.Search) ────────────────────────────────────────
+# The embedding model runs inside the Rust NIF and is chosen with the OS env
+# var PRZMA_EMBED_MODEL (read by the NIF itself, not here):
+#   unset                         -> minishlab/potion-base-8M (downloaded once from huggingface.co)
+#   /opt/przma/models/potion-base-8M -> a local folder with config.json, tokenizer.json, model.safetensors
+config :przma, :search,
+  # index uploaded text/PDF files in the background after upload (Files.upload)
+  auto_index: System.get_env("SEARCH_AUTO_INDEX", "false") == "true"

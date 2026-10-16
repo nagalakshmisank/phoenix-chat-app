@@ -94,6 +94,64 @@ defmodule PRZMA.PzDb do
     |> to_result()
   end
 
+  # ── VECTOR SEARCH (used only by Przma.Search) ─────────────────────────────
+  #
+  #   pzdb://{did}/search/{space}/chunks -> {global_base}/{did}/search/{space}/chunks.lance
+  #
+  # The NIF embeds the text itself (model inside the NIF). Writes must run
+  # inside Przma.Storage.DocWriter.
+
+  @doc "Loads the embedding model; returns its name, vector size and load time."
+  def vec_model_info, do: NIF.pzdb_vec_model_info() |> to_result()
+
+  @doc "Embeds a list of texts. Vectors are returned only when include_vectors is true."
+  def vec_embed(texts, include_vectors \\ false) when is_list(texts) do
+    NIF.pzdb_vec_embed(Jason.encode!(texts), include_vectors) |> to_result()
+  end
+
+  @doc "Embeds each row's `text` and upserts the rows by id in ONE commit."
+  def vec_upsert(pzdb_table_uri, rows) when is_binary(pzdb_table_uri) and is_list(rows) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_upsert(base, table, Jason.encode!(rows)) |> to_result()
+  end
+
+  @doc "Closest rows to `query_text` (cosine), optional SQL filter, nprobes for indexed tables."
+  def vec_search(pzdb_table_uri, query_text, limit, filter \\ "", nprobes \\ 20)
+      when is_binary(pzdb_table_uri) and is_binary(query_text) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_search(base, table, query_text, limit, filter, nprobes) |> to_result()
+  end
+
+  @doc "Rows matching an SQL filter (no vectors), e.g. keyword LIKE search."
+  def vec_query(pzdb_table_uri, filter, limit) when is_binary(pzdb_table_uri) and is_binary(filter) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_query(base, table, filter, limit) |> to_result()
+  end
+
+  @doc "Deletes rows matching an SQL filter (must not be empty)."
+  def vec_delete(pzdb_table_uri, filter) when is_binary(pzdb_table_uri) and is_binary(filter) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_delete(base, table, filter) |> to_result()
+  end
+
+  @doc "Builds the IVF-PQ vector index (0 = automatic value)."
+  def vec_index(pzdb_table_uri, num_partitions \\ 0, num_sub_vectors \\ 0) when is_binary(pzdb_table_uri) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_index(base, table, num_partitions, num_sub_vectors) |> to_result()
+  end
+
+  @doc "Compacts small files and prunes old versions of a vector table."
+  def vec_optimize(pzdb_table_uri, keep_hours) when is_binary(pzdb_table_uri) and is_integer(keep_hours) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_optimize(base, table, keep_hours) |> to_result()
+  end
+
+  @doc "Row count, version, vector size and index names of a vector table."
+  def vec_stats(pzdb_table_uri) when is_binary(pzdb_table_uri) do
+    {base, table} = resolve(pzdb_table_uri)
+    NIF.pzdb_vec_stats(base, table) |> to_result()
+  end
+
   # ── PRIVATE ───────────────────────────────────────────────────────────────
 
   # pzdb://{did}/{service}/{space}/{table}/{record_id}

@@ -80,6 +80,10 @@ defmodule Przma.Vault.Files do
 
       with :ok <- PzdbConnector.write(actor, PzdbUri.to_string(uri), [row]) do
         commons = replicate_if_public(space, owner_did, actor.did, content_cas, mime_type, size_bytes, ref_count)
+
+        # Vector search: index text/PDF files in the background (off unless SEARCH_AUTO_INDEX=true).
+        Przma.Search.Indexer.index_file_async(owner_did, file_id, metadata.filename, mime_type, bytes, space)
+
         {:ok, %{file_id: file_id, content_cas: content_cas, ref_count: ref_count, commons: commons}}
       end
     end

@@ -23,7 +23,7 @@ defmodule PRZMAWeb.ApiSpec do
   def spec do
     %OpenApi{
       info: %Info{
-        title: "PRZMA Backend API — Registration & Profile",
+        title: "PRZMA Backend API — Registration, Profile & Search",
         version: "0.1.0",
         description: """
         Keycloak-authenticated registration and profile endpoints.
@@ -50,6 +50,13 @@ defmodule PRZMAWeb.ApiSpec do
 
         The same operations are available in GraphQL at `/api/graphql`
         (`completeRegistration`, `profile`, `updateProfile`).
+
+        ## Search
+        Meaning-based (vector) and keyword search over the logged-in user's
+        OWN content. Pieces of text are embedded inside the Rust NIF and
+        stored in `s3://perkeep/{did}/search/{space}/chunks.lance`.
+        Order to try it: `POST /search/index` (save some text) →
+        `GET /search` (ask in other words) → `GET /search/stats`.
         """
       },
       servers: [
@@ -124,6 +131,75 @@ defmodule PRZMAWeb.ApiSpec do
               422 => resp("Write failed", "ErrorResponse")
             }
           }
+        },
+
+        "/api/v1/search/index" => %OpenApiSpex.PathItem{
+          post: %OpenApiSpex.Operation{
+            summary: "Index Text", tags: ["Search"], operationId: "search_index",
+            description: "Splits the text into pieces (~200 words), embeds them and saves " <>
+                         "them in the caller's own search table. Sending the same " <>
+                         "source_id again replaces its old pieces.",
+            security: [%{"BearerAuth" => []}],
+            requestBody: OpenApiSpex.Operation.request_body(
+              "Text to make searchable", "application/json",
+              %Reference{"$ref": "#/components/schemas/SearchIndexRequest"},
+              required: true
+            ),
+            responses: %{
+              200 => resp("Indexed", "SearchIndexResponse"),
+              400 => resp("text is required", "ErrorResponse"),
+              401 => resp("Missing or invalid Bearer token", "ErrorResponse"),
+              422 => resp("Indexing failed", "ErrorResponse")
+            }
+          }
+        },
+
+        "/api/v1/search" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Search", tags: ["Search"], operationId: "search",
+            description: "Searches ONLY the caller's own pieces. vector = by meaning " <>
+                         "(words may differ), keyword = words in the text, hybrid = both. " <>
+                         "Higher score = better match.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :q, in: :query, required: true,
+                description: "The question / search text",
+                schema: %Schema{type: :string}, example: "where did we stay in the hill station?"},
+              %OpenApiSpex.Parameter{name: :mode, in: :query, required: false,
+                description: "vector (default), keyword or hybrid",
+                schema: %Schema{type: :string, enum: ["vector", "keyword", "hybrid"], default: "vector"}},
+              %OpenApiSpex.Parameter{name: :limit, in: :query, required: false,
+                description: "Max results (1-50)",
+                schema: %Schema{type: :integer, default: 10, minimum: 1, maximum: 50}},
+              %OpenApiSpex.Parameter{name: :space, in: :query, required: false,
+                schema: %Schema{type: :string, enum: ["private", "personal", "public"], default: "private"}},
+              %OpenApiSpex.Parameter{name: :source_type, in: :query, required: false,
+                description: "Only this kind of source, e.g. doc, file, chat",
+                schema: %Schema{type: :string}}
+            ],
+            responses: %{
+              200 => resp("Results", "SearchResponse"),
+              400 => resp("q is required", "ErrorResponse"),
+              401 => resp("Missing or invalid Bearer token", "ErrorResponse"),
+              422 => resp("Search failed", "ErrorResponse")
+            }
+          }
+        },
+
+        "/api/v1/search/stats" => %OpenApiSpex.PathItem{
+          get: %OpenApiSpex.Operation{
+            summary: "Search Table Stats", tags: ["Search"], operationId: "search_stats",
+            description: "Rows, version, vector size and indexes of the caller's search table.",
+            security: [%{"BearerAuth" => []}],
+            parameters: [
+              %OpenApiSpex.Parameter{name: :space, in: :query, required: false,
+                schema: %Schema{type: :string, enum: ["private", "personal", "public"], default: "private"}}
+            ],
+            responses: %{
+              200 => resp("Stats", "SearchStatsResponse"),
+              401 => resp("Missing or invalid Bearer token", "ErrorResponse")
+            }
+          }
         }
       },
       components: %Components{
@@ -133,7 +209,11 @@ defmodule PRZMAWeb.ApiSpec do
           "ProfileAttrs"         => profile_attrs_schema(),
           "ProfileResponse"      => profile_response_schema(),
           "StatusResponse"       => status_response_schema(),
-          "ErrorResponse"        => error_response_schema()
+          "ErrorResponse"        => error_response_schema(),
+          "SearchIndexRequest"   => search_index_request_schema(),
+          "SearchIndexResponse"  => search_index_response_schema(),
+          "SearchResponse"       => search_response_schema(),
+          "SearchStatsResponse"  => search_stats_response_schema()
         },
         securitySchemes: %{
           "BearerAuth" => %OpenApiSpex.SecurityScheme{
@@ -236,6 +316,73 @@ defmodule PRZMAWeb.ApiSpec do
       type: :object, title: "ErrorResponse",
       required: [:error],
       properties: %{error: %Schema{type: :string}}
+    }
+  end
+
+  defp search_index_request_schema do
+    %Schema{
+      type: :object, title: "SearchIndexRequest",
+      required: [:text],
+      properties: %{
+        text:        %Schema{type: :string, example: "Family trip to Ooty: toy train, tea gardens, three nights at Sterling resort near the lake."},
+        source_type: %Schema{type: :string, default: "doc", example: "doc"},
+        source_id:   %Schema{type: :string, description: "Same id again = replace old pieces", example: "ooty"},
+        title:       %Schema{type: :string, nullable: true, example: "Ooty trip plan"},
+        space:       %Schema{type: :string, enum: ["private", "personal", "public"], default: "private"}
+      }
+    }
+  end
+
+  defp search_index_response_schema do
+    %Schema{
+      type: :object, title: "SearchIndexResponse",
+      properties: %{
+        source_id: %Schema{type: :string, example: "ooty"},
+        chunks:    %Schema{type: :integer, description: "Pieces saved", example: 1},
+        batches:   %Schema{type: :integer, example: 1},
+        embed_ms:  %Schema{type: :integer, example: 3},
+        write_ms:  %Schema{type: :integer, example: 950}
+      }
+    }
+  end
+
+  defp search_response_schema do
+    %Schema{
+      type: :object, title: "SearchResponse",
+      properties: %{
+        mode:      %Schema{type: :string, example: "vector"},
+        took_ms:   %Schema{type: :integer, example: 120},
+        embed_ms:  %Schema{type: :integer, nullable: true},
+        search_ms: %Schema{type: :integer, nullable: true},
+        results: %Schema{
+          type: :array,
+          items: %Schema{
+            type: :object,
+            properties: %{
+              id:          %Schema{type: :string, example: "doc:ooty#0"},
+              source_type: %Schema{type: :string, example: "doc"},
+              source_id:   %Schema{type: :string, example: "ooty"},
+              title:       %Schema{type: :string, nullable: true, example: "Ooty trip plan"},
+              chunk_index: %Schema{type: :integer, example: 0},
+              text:        %Schema{type: :string},
+              score:       %Schema{type: :number, example: 0.71}
+            }
+          }
+        }
+      }
+    }
+  end
+
+  defp search_stats_response_schema do
+    %Schema{
+      type: :object, title: "SearchStatsResponse",
+      properties: %{
+        exists:  %Schema{type: :boolean},
+        rows:    %Schema{type: :integer, example: 2},
+        version: %Schema{type: :integer},
+        dim:     %Schema{type: :integer, example: 256},
+        indices: %Schema{type: :array, items: %Schema{type: :string}}
+      }
     }
   end
 

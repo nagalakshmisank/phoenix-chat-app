@@ -31,3 +31,5 @@ arrow-json   = "=52.2.0"
 # sitting next to this file — it pins chrono to 0.4.39 (confirmed working,
 # from the real old working project), transitively, without touching this
 # file at all. Just don't delete Cargo.lock before compiling.
+# ── vector search: embedding model inside the NIF (pure Rust) ──
+model2vec-rs = "0.3"

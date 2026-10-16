@@ -36,7 +36,16 @@ defmodule Przma.Storage.DocWriter do
 
   @doc "Runs `fun` inside the DID's writer and returns its result."
   @spec run(String.t(), (-> term())) :: term()
-  def run(did, fun) when is_binary(did) and is_function(fun, 0), do: run(did, fun, 1)
+  def run(did, fun) when is_binary(did) and is_function(fun, 0), do: run(did, fun, 1, cfg(:writer_timeout_ms, 30_000))
+
+  @doc """
+  Same as run/2 with its own timeout, for long jobs that must still be
+  serialised per user (vector index builds, big batches of vectors).
+  """
+  @spec run_with_timeout(String.t(), (-> term()), pos_integer()) :: term()
+  def run_with_timeout(did, fun, timeout_ms)
+      when is_binary(did) and is_function(fun, 0) and is_integer(timeout_ms) and timeout_ms > 0,
+      do: run(did, fun, 1, timeout_ms)
 
   @doc "Number of writes waiting for this DID (0 when no writer is running). For load tests."
   @spec queue_length(String.t()) :: non_neg_integer()
@@ -61,10 +70,10 @@ defmodule Przma.Storage.DocWriter do
 
   # ── internal ─────────────────────────────────────────────────────────
 
-  defp run(did, fun, attempt) do
+  defp run(did, fun, attempt, timeout_ms) do
     with {:ok, pid} <- ensure_started(did) do
       try do
-        GenServer.call(pid, {:run, fun}, cfg(:writer_timeout_ms, 30_000))
+        GenServer.call(pid, {:run, fun}, timeout_ms)
       catch
         :exit, {:timeout, _} ->
           Logger.error("DocWriter timeout for #{did} (queue: #{queue_length(did)})")
@@ -72,7 +81,7 @@ defmodule Przma.Storage.DocWriter do
 
         # The writer stopped for being idle between lookup and call: start a new one.
         :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] and attempt < 3 ->
-          run(did, fun, attempt + 1)
+          run(did, fun, attempt + 1, timeout_ms)
 
         :exit, {reason, _} ->
           {:error, {:doc_writer_exit, reason}}

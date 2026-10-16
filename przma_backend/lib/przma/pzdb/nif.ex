@@ -53,4 +53,36 @@ defmodule PRZMA.PzDb.NIF do
 
   def pzdb_doc_stats(_base_path, _table_path),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # ── Vector search (Przma.Search only) ───────────────────────────────────
+  # One vector table per user+space (vec_schema in lib.rs). The embedding
+  # model runs inside the NIF (PRZMA_EMBED_MODEL). Writes must go through
+  # Przma.Storage.DocWriter (one writer per user).
+
+  def pzdb_vec_model_info(),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_embed(_texts_json, _include_vectors),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_upsert(_base_path, _table_path, _rows_json),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_search(_base_path, _table_path, _query_text, _limit, _filter, _nprobes),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_query(_base_path, _table_path, _filter, _limit),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_delete(_base_path, _table_path, _filter),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_index(_base_path, _table_path, _num_partitions, _num_sub_vectors),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_optimize(_base_path, _table_path, _keep_hours),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def pzdb_vec_stats(_base_path, _table_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

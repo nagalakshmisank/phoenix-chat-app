@@ -1,32 +1,38 @@
 import Config
 
-# config/runtime.exs is executed for all environments, including
-# during releases. It is executed after compilation and before the
-# system starts, so it is typically used to load production configuration
-# and secrets from environment variables or elsewhere. Do not define
-# any compile-time configuration in here, as it won't be applied.
-# The block below contains prod specific runtime configuration.
+# Loaded automatically by Mix at boot (dev, test, and releases) — this
+# is where the real Tier-1 S3/Keycloak env vars from your deployment
+# get read. Safe defaults let `mix phx.server` boot without every var
+# set, but a real write will fail without real AWS_* credentials.
 
-# ## Using releases
-#
-# If you use `mix release`, you need to explicitly enable the server
-# by passing the PHX_SERVER=true when you start it:
-#
-#     PHX_SERVER=true bin/chat_app start
-#
-# Alternatively, you can use `mix phx.gen.release` to generate a `bin/server`
-# script that automatically sets the env var above.
-if System.get_env("PHX_SERVER") do
-  config :chat_app, ChatAppWeb.Endpoint, server: true
+if secret_key_base = System.get_env("SECRET_KEY_BASE") do
+  config :przma, PRZMAWeb.Endpoint, secret_key_base: secret_key_base
 end
 
-config :chat_app, ChatAppWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+config :przma, :keycloak,
+  url: System.get_env("KEYCLOAK_URL", "http://172.235.18.126:8180"),
+  realm: System.get_env("KEYCLOAK_REALM", "przma")
 
-# Przma.CommonsCas.Repo — moved OUTSIDE the `if config_env() == :prod`
-# guard below on purpose. This must load in every environment (dev,
-# test, prod), since it's being tested live via `mix phx.server` in
-# dev right now, not just in a prod release.
+config :przma, :vault,
+  base_path: System.get_env("VAULT_BASE_PATH", "s3://perkeep"),
+  cas_backend: System.get_env("CAS_BACKEND", "s3"),
+  s3_bucket: System.get_env("S3_BUCKET", "perkeep"),
+  s3_endpoint: System.get_env("AWS_ENDPOINT", "https://in-maa-1.linodeobjects.com"),
+  s3_region: System.get_env("S3_REGION", "in-maa-1"),
+  s3_access_key: System.get_env("AWS_ACCESS_KEY_ID"),
+  s3_secret_key: System.get_env("AWS_SECRET_ACCESS_KEY")
+
+# Read directly by PRZMA.PzDb.global_base/0 (lib/przma/pzdb/pzdb.ex) —
+# this is the REAL production config key, different from the :vault
+# block above (which was this project's own earlier convention before
+# the real pzdb.ex/nif.ex were found). Both are set from the same env
+# var so nothing breaks; PzDb only reads this one.
+config :przma, :vault_base_path, System.get_env("VAULT_BASE_PATH", "s3://perkeep")
+
+# Przma.CommonsCas.Repo — the centralized Postgres database for
+# cross-tenant CAS analytics (przma_commons_cas). The one deliberate
+# exception to this project's "no Postgres" decision, isolated to
+# analytics only — never a source of truth for authorization.
 config :przma, Przma.CommonsCas.Repo,
   hostname: System.get_env("COMMONS_CAS_HOST", "172.235.18.126"),
   port: String.to_integer(System.get_env("COMMONS_CAS_PORT", "5432")),
@@ -35,98 +41,28 @@ config :przma, Przma.CommonsCas.Repo,
   password: System.get_env("COMMONS_CAS_PASSWORD", "PrzmaCommons@2026#Secure"),
   pool_size: 5
 
-if config_env() == :prod do
-  database_url =
-    System.get_env("DATABASE_URL") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
+# ── LanceDB doc store (replaces CouchDB) ────────────────────────────────
+# Tables live in S3 under VAULT_BASE_PATH (see :vault_base_path above).
+# The Rust NIF reads the S3 credentials from the OS env:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT, AWS_DEFAULT_REGION
+config :przma, :lance_doc,
+  # max wait for a user's write queue (DocWriter) before the request fails
+  writer_timeout_ms: String.to_integer(System.get_env("LANCE_WRITER_TIMEOUT_MS", "30000")),
+  # a user's writer process stops after this long without writes
+  writer_idle_stop_ms: String.to_integer(System.get_env("LANCE_WRITER_IDLE_MS", "300000")),
+  # safety cap on rows read from one table in one query
+  query_max_rows: String.to_integer(System.get_env("LANCE_QUERY_MAX_ROWS", "100000")),
+  # LanceCompactor: minutes between passes (0 = off), writes needed per table,
+  # and how many hours of old versions to keep
+  compact_interval_min: String.to_integer(System.get_env("LANCE_COMPACT_INTERVAL_MIN", "30")),
+  compact_min_writes: String.to_integer(System.get_env("LANCE_COMPACT_MIN_WRITES", "50")),
+  keep_versions_hours: String.to_integer(System.get_env("LANCE_KEEP_VERSIONS_HOURS", "1"))
 
-  maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
-
-  config :chat_app, ChatApp.Repo,
-    # ssl: true,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
-    socket_options: maybe_ipv6
-
-  # The secret key base is used to sign/encrypt cookies and other secrets.
-  # A default value is used in config/dev.exs and config/test.exs but you
-  # want to use a different value for prod and you most likely don't want
-  # to check this value into version control, so we use an environment
-  # variable instead.
-  secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
-
-  host = System.get_env("PHX_HOST") || "example.com"
-
-  config :chat_app, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
-
-  config :chat_app, ChatAppWeb.Endpoint,
-    url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
-    ],
-    secret_key_base: secret_key_base
-
-  # ## SSL Support
-  #
-  # To get SSL working, you will need to add the `https` key
-  # to your endpoint configuration:
-  #
-  #     config :chat_app, ChatAppWeb.Endpoint,
-  #       https: [
-  #         ...,
-  #         port: 443,
-  #         cipher_suite: :strong,
-  #         keyfile: System.get_env("SOME_APP_SSL_KEY_PATH"),
-  #         certfile: System.get_env("SOME_APP_SSL_CERT_PATH")
-  #       ]
-  #
-  # The `cipher_suite` is set to `:strong` to support only the
-  # latest and more secure SSL ciphers. This means old browsers
-  # and clients may not be supported. You can set it to
-  # `:compatible` for wider support.
-  #
-  # `:keyfile` and `:certfile` expect an absolute path to the key
-  # and cert in disk or a relative path inside priv, for example
-  # "priv/ssl/server.key". For all supported SSL configuration
-  # options, see https://hexdocs.pm/plug/Plug.SSL.html#configure/1
-  #
-  # We also recommend setting `force_ssl` in your config/prod.exs,
-  # ensuring no data is ever sent via http, always redirecting to https:
-  #
-  #     config :chat_app, ChatAppWeb.Endpoint,
-  #       force_ssl: [hsts: true]
-  #
-  # Check `Plug.SSL` for all available options in `force_ssl`.
-
-  # ## Configuring the mailer
-  #
-  # In production you need to configure the mailer to use a different adapter.
-  # Here is an example configuration for Mailgun:
-  #
-  #     config :chat_app, ChatApp.Mailer,
-  #       adapter: Swoosh.Adapters.Mailgun,
-  #       api_key: System.get_env("MAILGUN_API_KEY"),
-  #       domain: System.get_env("MAILGUN_DOMAIN")
-  #
-  # Most non-SMTP adapters require an API client. Swoosh supports Req, Hackney,
-  # and Finch out-of-the-box. This configuration is typically done at
-  # compile-time in your config/prod.exs:
-  #
-  #     config :swoosh, :api_client, Swoosh.ApiClient.Req
-  #
-  # See https://hexdocs.pm/swoosh/Swoosh.html#module-installation for details.
-end
+# ── Vector search (Przma.Search) ────────────────────────────────────────
+# The embedding model runs inside the Rust NIF and is chosen with the OS env
+# var PRZMA_EMBED_MODEL (read by the NIF itself, not here):
+#   unset                         -> minishlab/potion-base-8M (downloaded once from huggingface.co)
+#   /opt/przma/models/potion-base-8M -> a local folder with config.json, tokenizer.json, model.safetensors
+config :przma, :search,
+  # index uploaded text/PDF files in the background after upload (Files.upload)
+  auto_index: System.get_env("SEARCH_AUTO_INDEX", "false") == "true"

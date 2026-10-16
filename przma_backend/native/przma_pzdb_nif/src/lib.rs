@@ -1118,6 +1118,491 @@ fn pzdb_doc_stats(base_path: String, table_path: String) -> NifResult<String> {
     })
 }
 
+// ── VECTOR SEARCH (embeddings + similarity search) ─────────────────────────
+//
+// Used by Przma.Search (lib/przma/search/search.ex). One vector table per user
+// and space, at the same S3 tree as every other pzdb table:
+//
+//     {base}/{did}/search/{space}/chunks.lance
+//
+// Every row is one piece ("chunk") of a file, message or document:
+//     id, did, space, source_type, source_id, title, chunk_index, text,
+//     created_at, vector[dim]
+//
+// The embedding model runs HERE, inside the NIF (model2vec-rs, pure Rust, no
+// Python / ONNX / API key). Default model: minishlab/potion-base-8M (256 dims).
+// Change it with the env var PRZMA_EMBED_MODEL: a HuggingFace repo id, or a
+// local folder holding config.json, tokenizer.json and model.safetensors.
+// The model is loaded once (first use) and shared by all calls.
+//
+// Writes must go through Przma.Storage.DocWriter (one writer per user), the
+// same rule as the doc tables: Lance on S3 has no safe multi-writer commit.
+
+use lancedb::index::vector::IvfPqIndexBuilder;
+use lancedb::index::Index;
+use lancedb::query::Select;
+use lancedb::DistanceType;
+use model2vec_rs::model::StaticModel;
+use std::sync::Mutex;
+
+const VEC_MARKER: &str = "vector";
+const VEC_MAX_TOKENS: usize = 512;
+const VEC_BATCH: usize = 256;
+
+// Columns returned by searches (everything except the vector itself).
+const VEC_OUT_COLUMNS: [&str; 9] = [
+    "id", "did", "space", "source_type", "source_id", "title", "chunk_index", "text", "created_at",
+];
+
+static EMBEDDER: Mutex<Option<(String, Arc<StaticModel>)>> = Mutex::new(None);
+
+fn embed_model_name() -> String {
+    std::env::var("PRZMA_EMBED_MODEL").unwrap_or_else(|_| "minishlab/potion-base-8M".to_string())
+}
+
+// Loads the model on first use (downloads it from HuggingFace once, or reads a
+// local folder), then returns the shared copy.
+fn embedder() -> DocResult<(String, Arc<StaticModel>)> {
+    let mut guard = EMBEDDER.lock().map_err(|_| "embedding model lock poisoned".to_string())?;
+    if let Some((name, model)) = guard.as_ref() {
+        return Ok((name.clone(), model.clone()));
+    }
+    let name = embed_model_name();
+    let model = StaticModel::from_pretrained(&name, None, Some(true), None)
+        .map_err(|e| format!("embedding model load failed ({}): {}", name, e))?;
+    let model = Arc::new(model);
+    *guard = Some((name.clone(), model.clone()));
+    Ok((name, model))
+}
+
+// Text -> vectors, on a blocking thread (CPU work must not stall tokio).
+async fn embed_texts(texts: Vec<String>) -> DocResult<Vec<Vec<f32>>> {
+    tokio::task::spawn_blocking(move || {
+        let (_, model) = embedder()?;
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let vectors = model.encode_with_args(&texts, Some(VEC_MAX_TOKENS), VEC_BATCH);
+        if vectors.len() != texts.len() {
+            return Err(format!("model returned {} vectors for {} texts", vectors.len(), texts.len()));
+        }
+        Ok(vectors)
+    })
+    .await
+    .map_err(derr)?
+}
+
+fn ms_since(t: std::time::Instant) -> u128 {
+    t.elapsed().as_millis()
+}
+
+fn vec_schema(dim: i32) -> Arc<Schema> {
+    Arc::new(Schema::new(Fields::from(vec![
+        Field::new("id",          DataType::Utf8,  false), // "<source_id>#<chunk_index>"
+        Field::new("did",         DataType::Utf8,  false), // owner
+        Field::new("space",       DataType::Utf8,  false), // private | personal | public
+        Field::new("source_type", DataType::Utf8,  false), // file | chat | doc | …
+        Field::new("source_id",   DataType::Utf8,  false), // file_id / message id / doc id
+        Field::new("title",       DataType::Utf8,  true),  // file name, chat name …
+        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("text",        DataType::Utf8,  false), // the piece of text itself
+        Field::new("created_at",  DataType::Int64, false), // microseconds
+        Field::new(
+            VEC_MARKER,
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dim),
+            false,
+        ),
+    ])))
+}
+
+fn table_dim(schema: &Schema) -> Option<i32> {
+    match schema.field_with_name(VEC_MARKER).ok()?.data_type() {
+        DataType::FixedSizeList(_, n) => Some(*n),
+        _ => None,
+    }
+}
+
+// Opens {dir}/{table}.lance. Missing: created with `create_dim` dims, or None.
+// A table built with another model (other dims) is refused, never mixed.
+async fn open_vec_table(dir: &str, table: &str, create_dim: Option<i32>) -> DocResult<Option<Table>> {
+    let conn = connect(dir).execute().await.map_err(derr)?;
+    let t = match conn.open_table(table).execute().await {
+        Ok(t) => t,
+        Err(lancedb::Error::TableNotFound { .. }) => match create_dim {
+            Some(dim) => conn
+                .create_empty_table(table, vec_schema(dim))
+                .execute()
+                .await
+                .map_err(derr)?,
+            None => return Ok(None),
+        },
+        Err(e) => return Err(derr(e)),
+    };
+
+    let schema = t.schema().await.map_err(derr)?;
+    match (table_dim(&schema), create_dim) {
+        (None, _) => Err(format!("schema_mismatch: {}/{}.lance is not a vector table", dir, table)),
+        (Some(have), Some(want)) if have != want => Err(format!(
+            "dimension_mismatch: table has {} dims, model gives {} (model changed? delete and re-index)",
+            have, want
+        )),
+        _ => Ok(Some(t)),
+    }
+}
+
+fn json_to_vec_batch(rows: &[Value], vectors: &[Vec<f32>], dim: i32) -> DocResult<RecordBatch> {
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let so = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let i64v = |v: &Value, k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+
+    let mut flat: Vec<f32> = Vec::with_capacity(rows.len() * dim as usize);
+    for v in vectors {
+        if v.len() != dim as usize {
+            return Err(format!("vector has {} dims, expected {}", v.len(), dim));
+        }
+        flat.extend_from_slice(v);
+    }
+    let vector_col = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        dim,
+        Arc::new(Float32Array::from(flat)),
+        None,
+    )
+    .map_err(derr)?;
+
+    let col = |k: &str| -> Arc<StringArray> {
+        Arc::new(StringArray::from(rows.iter().map(|r| s(r, k)).collect::<Vec<_>>()))
+    };
+
+    RecordBatch::try_new(
+        vec_schema(dim),
+        vec![
+            col("id"),
+            col("did"),
+            col("space"),
+            col("source_type"),
+            col("source_id"),
+            Arc::new(StringArray::from(rows.iter().map(|r| so(r, "title")).collect::<Vec<_>>())),
+            Arc::new(Int32Array::from(
+                rows.iter().map(|r| i64v(r, "chunk_index") as i32).collect::<Vec<_>>(),
+            )),
+            col("text"),
+            Arc::new(Int64Array::from(rows.iter().map(|r| i64v(r, "created_at")).collect::<Vec<_>>())),
+            Arc::new(vector_col),
+        ],
+    )
+    .map_err(derr)
+}
+
+fn out_columns() -> Select {
+    Select::Columns(VEC_OUT_COLUMNS.iter().map(|c| c.to_string()).collect())
+}
+
+/// Loads the embedding model now and reports its name and size.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_model_info() -> NifResult<String> {
+    run_doc(async move {
+        let started = std::time::Instant::now();
+        let vectors = embed_texts(vec!["hello".to_string()]).await?;
+        let (name, _) = embedder()?;
+        Ok(json!({
+            "status": "ok",
+            "model": name,
+            "dim": vectors.first().map(|v| v.len()).unwrap_or(0),
+            "load_ms": ms_since(started),
+        })
+        .to_string())
+    })
+}
+
+/// Embeds texts (JSON array of strings). Returns timing, and the vectors
+/// themselves only when `include_vectors` is true (tests / debugging).
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_embed(texts_json: String, include_vectors: bool) -> NifResult<String> {
+    run_doc(async move {
+        let texts: Vec<String> = serde_json::from_str(&texts_json).map_err(derr)?;
+        let count = texts.len();
+        let started = std::time::Instant::now();
+        let vectors = embed_texts(texts).await?;
+        let ms = ms_since(started);
+        let mut out = json!({
+            "status": "ok",
+            "count": count,
+            "dim": vectors.first().map(|v| v.len()).unwrap_or(0),
+            "embed_ms": ms,
+        });
+        if include_vectors {
+            out["vectors"] = json!(vectors);
+        }
+        Ok(out.to_string())
+    })
+}
+
+/// Embeds the `text` of each row (JSON array) and upserts the rows by `id`
+/// in ONE commit. Creates the table on first use.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_upsert(base_path: String, table_path: String, rows_json: String) -> NifResult<String> {
+    run_doc(async move {
+        let rows: Vec<Value> = serde_json::from_str(&rows_json).map_err(derr)?;
+        if rows.is_empty() {
+            return Ok(json!({"status": "ok", "count": 0}).to_string());
+        }
+        for r in &rows {
+            let id = r.get("id").and_then(Value::as_str).unwrap_or("");
+            let text = r.get("text").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() || text.trim().is_empty() {
+                return Err("every row needs a non-empty id and text".to_string());
+            }
+        }
+
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.get("text").and_then(Value::as_str).unwrap_or("").to_string())
+            .collect();
+        let t_embed = std::time::Instant::now();
+        let vectors = embed_texts(texts).await?;
+        let embed_ms = ms_since(t_embed);
+        let dim = vectors.first().map(|v| v.len()).unwrap_or(0) as i32;
+
+        let t_write = std::time::Instant::now();
+        let table = open_vec_table(&base_path, &table_path, Some(dim))
+            .await?
+            .ok_or_else(|| "vector table could not be created".to_string())?;
+        let batch = json_to_vec_batch(&rows, &vectors, dim)?;
+        let count = batch.num_rows();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], vec_schema(dim));
+
+        if table.count_rows(None).await.map_err(derr)? == 0 {
+            table.add(reader).execute().await.map_err(derr)?;
+        } else {
+            let mut builder = table.merge_insert(&["id"]);
+            builder.when_matched_update_all(None).when_not_matched_insert_all();
+            builder.execute(Box::new(reader)).await.map_err(derr)?;
+        }
+        let version = table.version().await.map_err(derr)?;
+
+        Ok(json!({
+            "status": "ok",
+            "count": count,
+            "dim": dim,
+            "version": version,
+            "embed_ms": embed_ms,
+            "write_ms": ms_since(t_write),
+        })
+        .to_string())
+    })
+}
+
+/// Similarity search: embeds `query_text`, returns the `limit` closest rows
+/// (cosine). `filter` is an optional SQL filter ("" = none); `nprobes` only
+/// matters once an index exists (0 = default). Missing table => [].
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_search(
+    base_path: String,
+    table_path: String,
+    query_text: String,
+    limit: u64,
+    filter: String,
+    nprobes: u64,
+) -> NifResult<String> {
+    run_doc(async move {
+        let table = match open_vec_table(&base_path, &table_path, None).await? {
+            Some(t) => t,
+            None => return Ok(json!({"status": "ok", "records": [], "total": 0}).to_string()),
+        };
+
+        let t_embed = std::time::Instant::now();
+        let mut vectors = embed_texts(vec![query_text]).await?;
+        let query_vector = vectors.pop().ok_or_else(|| "query embedding failed".to_string())?;
+        let embed_ms = ms_since(t_embed);
+
+        let t_search = std::time::Instant::now();
+        let mut q = table
+            .query()
+            .nearest_to(query_vector)
+            .map_err(derr)?
+            .distance_type(DistanceType::Cosine)
+            .limit(limit as usize)
+            .select(out_columns());
+        if nprobes > 0 {
+            // Index search: look in `nprobes` partitions, then re-check the best
+            // limit x 10 candidates with their exact vectors (better recall).
+            q = q.nprobes(nprobes as usize).refine_factor(10);
+        }
+        if !filter.trim().is_empty() {
+            q = q.only_if(filter);
+        }
+        let batches: Vec<RecordBatch> =
+            q.execute().await.map_err(derr)?.try_collect().await.map_err(derr)?;
+        let records = batches_to_json(&batches);
+
+        Ok(json!({
+            "status": "ok",
+            "records": records,
+            "total": records.len(),
+            "embed_ms": embed_ms,
+            "search_ms": ms_since(t_search),
+        })
+        .to_string())
+    })
+}
+
+/// Plain filtered read (no vectors), e.g. keyword search with
+/// "lower(text) LIKE '%biryani%'". Missing table => [].
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_query(base_path: String, table_path: String, filter: String, limit: u64) -> NifResult<String> {
+    run_doc(async move {
+        let table = match open_vec_table(&base_path, &table_path, None).await? {
+            Some(t) => t,
+            None => return Ok(json!({"status": "ok", "records": [], "total": 0}).to_string()),
+        };
+        let started = std::time::Instant::now();
+        let mut q = table.query().limit(limit as usize).select(out_columns());
+        if !filter.trim().is_empty() {
+            q = q.only_if(filter);
+        }
+        let batches: Vec<RecordBatch> =
+            q.execute().await.map_err(derr)?.try_collect().await.map_err(derr)?;
+        let records = batches_to_json(&batches);
+        Ok(json!({
+            "status": "ok",
+            "records": records,
+            "total": records.len(),
+            "search_ms": ms_since(started),
+        })
+        .to_string())
+    })
+}
+
+/// Deletes rows matching an SQL filter, e.g. "source_id = 'f_9k2m'"
+/// (re-index or file deleted). Missing table => ok.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_delete(base_path: String, table_path: String, filter: String) -> NifResult<String> {
+    run_doc(async move {
+        if filter.trim().is_empty() {
+            return Err("delete needs a filter".to_string());
+        }
+        match open_vec_table(&base_path, &table_path, None).await? {
+            None => Ok(json!({"status": "ok", "skipped": "no_table"}).to_string()),
+            Some(t) => {
+                let before = t.count_rows(None).await.map_err(derr)?;
+                t.delete(&filter).await.map_err(derr)?;
+                let after = t.count_rows(None).await.map_err(derr)?;
+                Ok(json!({"status": "ok", "deleted": before.saturating_sub(after)}).to_string())
+            }
+        }
+    })
+}
+
+/// Builds (or rebuilds) the IVF-PQ vector index for fast search on big tables.
+/// 0 = let LanceDB choose. num_sub_vectors must divide the vector size.
+/// Needs at least 256 rows (PQ training).
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_index(
+    base_path: String,
+    table_path: String,
+    num_partitions: u32,
+    num_sub_vectors: u32,
+) -> NifResult<String> {
+    run_doc(async move {
+        let table = open_vec_table(&base_path, &table_path, None)
+            .await?
+            .ok_or_else(|| "no_table".to_string())?;
+        let rows = table.count_rows(None).await.map_err(derr)?;
+        if rows < 256 {
+            return Err(format!("index needs at least 256 rows, table has {}", rows));
+        }
+
+        let mut builder = IvfPqIndexBuilder::default().distance_type(DistanceType::Cosine);
+        if num_partitions > 0 {
+            builder = builder.num_partitions(num_partitions);
+        }
+        if num_sub_vectors > 0 {
+            builder = builder.num_sub_vectors(num_sub_vectors);
+        }
+
+        let started = std::time::Instant::now();
+        table
+            .create_index(&[VEC_MARKER], Index::IvfPq(builder))
+            .execute()
+            .await
+            .map_err(derr)?;
+
+        Ok(json!({
+            "status": "ok",
+            "rows": rows,
+            "index_ms": ms_since(started),
+            "version": table.version().await.map_err(derr)?,
+        })
+        .to_string())
+    })
+}
+
+/// Compacts small files and prunes old versions of a vector table
+/// (LanceCompactor calls this for search tables). Keeps the vector index.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_optimize(base_path: String, table_path: String, keep_hours: u64) -> NifResult<String> {
+    run_doc(async move {
+        let table = match open_vec_table(&base_path, &table_path, None).await? {
+            Some(t) => t,
+            None => return Ok(json!({"status": "ok", "skipped": "no_table"}).to_string()),
+        };
+        let compaction = table
+            .optimize(OptimizeAction::Compact { options: CompactionOptions::default(), remap_options: None })
+            .await
+            .map_err(derr)?
+            .compaction;
+        let older_than = LanceDuration::try_hours(keep_hours as i64).ok_or_else(|| "invalid keep_hours".to_string())?;
+        let prune = table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(older_than),
+                delete_unverified: Some(false),
+                error_if_tagged_old_versions: Some(false),
+            })
+            .await
+            .map_err(derr)?
+            .prune;
+        Ok(json!({
+            "status": "ok",
+            "version": table.version().await.map_err(derr)?,
+            "fragments_removed": compaction.as_ref().map(|c| c.fragments_removed).unwrap_or(0),
+            "fragments_added":   compaction.as_ref().map(|c| c.fragments_added).unwrap_or(0),
+            "old_versions":      prune.as_ref().map(|p| p.old_versions).unwrap_or(0),
+            "bytes_removed":     prune.as_ref().map(|p| p.bytes_removed).unwrap_or(0),
+        })
+        .to_string())
+    })
+}
+
+/// Row count, version, vector size and index names of one vector table.
+#[rustler::nif(schedule = "DirtyIo")]
+fn pzdb_vec_stats(base_path: String, table_path: String) -> NifResult<String> {
+    run_doc(async move {
+        match open_vec_table(&base_path, &table_path, None).await? {
+            None => Ok(json!({"status": "ok", "exists": false, "rows": 0}).to_string()),
+            Some(t) => {
+                let schema = t.schema().await.map_err(derr)?;
+                let indices: Vec<String> = t
+                    .list_indices()
+                    .await
+                    .map_err(derr)?
+                    .into_iter()
+                    .map(|i| format!("{} ({})", i.name, i.columns.join(",")))
+                    .collect();
+                Ok(json!({
+                    "status": "ok",
+                    "exists": true,
+                    "rows": t.count_rows(None).await.map_err(derr)?,
+                    "version": t.version().await.map_err(derr)?,
+                    "dim": table_dim(&schema),
+                    "indices": indices,
+                })
+                .to_string())
+            }
+        }
+    })
+}
+
 // ── STUBS (present only to satisfy the nif.ex contract; not on the upload path) ─
 
 #[rustler::nif(schedule = "DirtyIo")]
