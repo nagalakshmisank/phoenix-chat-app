@@ -7,6 +7,7 @@ defmodule PRZMAWeb.Graphql.Schema do
   import_types PRZMAWeb.Graphql.Types.ChatTypes
   import_types PRZMAWeb.Graphql.Types.CircleTypes
   import_types PRZMAWeb.Graphql.Types.SocialTypes
+  import_types PRZMAWeb.Graphql.Types.CalendarTypes
   alias PRZMAWeb.Graphql.Resolvers.{ProfileResolver, FilesResolver, RegistrationResolver}
 
   # The chat / circle / social services return documents (decoded doc_json), whose
@@ -35,6 +36,7 @@ defmodule PRZMAWeb.Graphql.Schema do
     import_fields :chat_queries
     import_fields :circle_queries
     import_fields :social_queries
+    import_fields :calendar_queries
 
     @desc "The caller's profile (vault namespace, private space)."
     field :profile, :profile do
@@ -72,6 +74,7 @@ defmodule PRZMAWeb.Graphql.Schema do
     import_fields :chat_mutations
     import_fields :circle_mutations
     import_fields :social_mutations
+    import_fields :calendar_mutations
 
     @desc """
     Call once right after Keycloak sign-up (safe to repeat). Creates the
@@ -152,6 +155,22 @@ defmodule PRZMAWeb.Graphql.Schema do
       end
 
       resolve fn event, _args, _res -> {:ok, event} end
+    end
+
+    @desc "Live changes of one calendar. Anyone who can see the calendar may subscribe."
+    field :calendar_updated, :calendar_update do
+      arg :calendar_id, non_null(:string)
+
+      config fn %{calendar_id: calendar_id}, %{context: context} ->
+        with %{did: did} when is_binary(did) <- context,
+             {:ok, _ctx} <- Przma.Calendar.Access.resolve(did, calendar_id) do
+          {:ok, topic: "calendar:" <> calendar_id}
+        else
+          _ -> {:error, "forbidden"}
+        end
+      end
+
+      resolve fn update, _args, _res -> {:ok, update} end
     end
   end
 end

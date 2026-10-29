@@ -47,8 +47,35 @@ config :przma, :doc_store_tables, [
   {"social", "contact_types"},
   {"social", "following"},
   {"social", "accounts"},
-  {"social", "notification_settings"}
+  {"social", "notification_settings"},
+  # calendar service (lib/przma/calendar) — per-user tables
+  {"calendar", "calendars"},
+  {"calendar", "events"},
+  {"calendar", "shares"},
+  {"calendar", "invites"},
+  {"calendar", "subscriptions"},
+  {"calendar", "invited"},
+  {"calendar", "private_notes"},
+  # calendar service — shared tables of did:przma-system:calendar
+  {"calendar", "index"},
+  {"calendar", "circle_calendars"},
+  {"calendar", "reminders"},
+  {"calendar", "scheduler"},
+  {"calendar", "holidays"}
 ]
+
+# Calendar service defaults (lib/przma/calendar).
+config :przma, :calendar,
+  default_timezone: "Asia/Kolkata",
+  default_region: "IN_TN",
+  # minutes before the start, used when createEvent sends no reminders
+  default_reminders: [15]
+
+# Reminder scheduler: run on ONE node only.
+config :przma, Przma.Calendar.ReminderScheduler,
+  enabled: true,
+  interval_ms: 60_000,
+  import_holidays_on_boot: false
 
 config :przma, :doc_store_adapter, Przma.Vault.LanceDocAdapter
 

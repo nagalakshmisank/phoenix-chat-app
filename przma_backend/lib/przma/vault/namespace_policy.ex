@@ -72,19 +72,14 @@ defmodule Przma.Vault.NamespacePolicy do
   # targets: a namespace listed read-only here stays read-only even for
   # its "personal" space, same as it would for "private" or "public".
   #
-  # CAUTION — calendar is listed read-only below to match the example
-  # given when this table was designed, but lib/przma/vault/calendar.ex
-  # currently has its own write actions (creating/updating events). If
-  # calendar is meant to stay writable through that module, either this
-  # entry needs [:read, :write] or calendar.ex's writes need to go
-  # through a different namespace than "calendar" — confirm before
-  # deploying, this WILL break calendar.ex's writes as currently listed.
+  # calendar: writable — the calendar service (lib/przma/calendar/*)
+  # creates and updates calendars, events, shares, invites and reminders.
   @allowed_operations_by_namespace %{
     "vault" => [:read, :write],
     "moments" => [:read, :write, :compact],
     "holnn" => [:read, :write, :compact],
     "notes" => [:read, :write, :compact],
-    "calendar" => [:read],
+    "calendar" => [:read, :write, :compact],
     "chat" => [:read, :write],
     "social" => [:read, :write, :compact],
     "workflow" => [:read, :write],

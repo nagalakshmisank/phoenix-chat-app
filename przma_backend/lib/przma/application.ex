@@ -25,7 +25,9 @@ defmodule Przma.Application do
       {DynamicSupervisor, name: Przma.Storage.DocWriterSupervisor, strategy: :one_for_one},
       Przma.Storage.LanceCompactor,
       # Vector search: background indexing tasks (Przma.Search.Indexer).
-      {Task.Supervisor, name: Przma.Search.TaskSupervisor}
+      {Task.Supervisor, name: Przma.Search.TaskSupervisor},
+      # Calendar: fires due reminders every minute (single node only).
+      Przma.Calendar.ReminderScheduler
     ]
 
     opts = [strategy: :one_for_one, name: Przma.Supervisor]

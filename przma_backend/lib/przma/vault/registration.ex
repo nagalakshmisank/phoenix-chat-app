@@ -33,6 +33,9 @@ defmodule Przma.Vault.Registration do
         # Shared account directory: lets other users find this DID (add
         # contact, send message). Best-effort — never fails registration.
         Przma.Social.Directory.put_account(did, tenant_uuid, attrs)
+        # Default personal calendar. Best-effort and idempotent (its id is
+        # derived from the DID); myCalendars also creates it if missing.
+        ensure_default_calendar(did)
         # `database` is kept (same key the frontend already reads); it now
         # holds the user's S3 folder instead of a CouchDB database name.
         prefix = LanceDocPath.user_prefix(did)
@@ -41,6 +44,15 @@ defmodule Przma.Vault.Registration do
       {:error, _} = err ->
         err
     end
+  end
+
+  defp ensure_default_calendar(did) do
+    Przma.Calendar.ensure_default_calendar(did)
+  rescue
+    error ->
+      require Logger
+      Logger.warning("default calendar for #{did} not created: #{inspect(error)}")
+      :ok
   end
 
   defp blank_to_nil(nil), do: nil

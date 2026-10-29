@@ -7,3 +7,5 @@ config :przma, PRZMAWeb.Endpoint,
   server: false
 
 config :logger, level: :warning
+
+config :przma, Przma.Calendar.ReminderScheduler, enabled: false

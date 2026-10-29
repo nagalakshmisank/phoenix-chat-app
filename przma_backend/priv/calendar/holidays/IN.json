@@ -1,0 +1,50 @@
+[
+  {
+    "region": "IN",
+    "date": "2026-01-26",
+    "name": "Republic Day",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2026-08-15",
+    "name": "Independence Day",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2026-10-02",
+    "name": "Gandhi Jayanti",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2026-12-25",
+    "name": "Christmas",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2027-01-26",
+    "name": "Republic Day",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2027-08-15",
+    "name": "Independence Day",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2027-10-02",
+    "name": "Gandhi Jayanti",
+    "holiday_kind": "public"
+  },
+  {
+    "region": "IN",
+    "date": "2027-12-25",
+    "name": "Christmas",
+    "holiday_kind": "public"
+  }
+]
