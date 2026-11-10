@@ -25,14 +25,15 @@ defmodule Przma.Storage.LanceDocPath do
   @doc "Full .lance location of a table, for logs, API responses and tests."
   @spec location(PzdbUri.t()) :: String.t()
   def location(%PzdbUri{did: did, namespace: ns, space: space, table: table}) do
-    Enum.join([base(), seg(did), seg(ns), seg(space), seg(table) <> ".lance"], "/")
+    Enum.join([base(did), seg(did), seg(ns), seg(space), seg(table) <> ".lance"], "/")
   end
 
-  @doc "A user's root folder in S3, e.g. s3://perkeep/did_przma_kc_user1/"
+  @doc "A user's root folder in S3, e.g. s3://perkeep/did_przma_kc_user1/ (tier1) or s3://przma-<uuid>/did_przma_kc_user2/ (tier2)"
   @spec user_prefix(String.t()) :: String.t()
-  def user_prefix(did) when is_binary(did), do: base() <> "/" <> seg(did) <> "/"
+  def user_prefix(did) when is_binary(did), do: base(did) <> "/" <> seg(did) <> "/"
 
-  # Same base and sanitising as PRZMA.PzDb (global_base/0, seg/1).
-  defp base, do: Application.get_env(:przma, :vault_base_path, "/var/przma/vaults")
+  # Same per-user base and sanitising as PRZMA.PzDb (resolve/1, seg/1):
+  # tier1 s3://perkeep, tier2 s3://przma-<uuid> (Przma.Storage.Location).
+  defp base(did), do: Przma.Storage.Location.base_for(did)
   defp seg(s), do: String.replace(s, [":", " "], "_")
 end

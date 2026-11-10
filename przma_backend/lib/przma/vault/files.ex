@@ -65,6 +65,7 @@ defmodule Przma.Vault.Files do
 
     with {:ok, content_cas} <- Cas.put(actor, uri, bytes) do
       ref_count = record_cas_meta(actor, tenant_uuid, owner_did, content_cas, size_bytes, space)
+      count_new_storage(owner_did, ref_count, size_bytes)
       file_id = generate_file_id()
 
       row = %{
@@ -107,6 +108,7 @@ defmodule Przma.Vault.Files do
 
     with {:ok, content_cas} <- Cas.put(actor, uri, bytes),
          {:ok, ref_count} <- CasMeta.record(actor, tenant_uuid, owner_did, content_cas, size_bytes, space) do
+      count_new_storage(owner_did, ref_count, size_bytes)
       commons = replicate_if_public(space, owner_did, actor.did, content_cas, mime_type, size_bytes, ref_count)
       {:ok, %{content_cas: content_cas, size_bytes: size_bytes, ref_count: ref_count, commons: commons}}
     end
@@ -230,4 +232,9 @@ defmodule Przma.Vault.Files do
 
   defp reason_text(reason) when is_binary(reason), do: reason
   defp reason_text(reason), do: inspect(reason)
+
+  # Storage used (przma_authz.storage_usage): count only NEW content
+  # (ref_count 1), since a duplicate upload is stored once (CAS).
+  defp count_new_storage(owner_did, 1, size_bytes), do: Przma.Authz.add_storage(owner_did, size_bytes)
+  defp count_new_storage(_owner_did, _ref_count, _size_bytes), do: :ok
 end

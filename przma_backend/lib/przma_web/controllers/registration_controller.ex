@@ -12,7 +12,8 @@ defmodule PRZMAWeb.RegistrationController do
       did: conn.assigns.did,
       tenant_uuid: conn.assigns.tenant_uuid,
       storage_tier: conn.assigns[:storage_tier] || 1,
-      token_claims: conn.assigns[:token_claims] || %{}
+      token_claims: conn.assigns[:token_claims] || %{},
+      ip: conn.assigns[:client_ip]
     }
 
     case Registration.complete(identity, params["nickname"]) do

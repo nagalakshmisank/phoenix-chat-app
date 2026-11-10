@@ -30,6 +30,14 @@ defmodule PRZMAWeb.Router do
   end
 
   # ------------------------------------------------------------
+  # Authorisation scope for REST routes (GraphQL fields are checked
+  # by PRZMAWeb.Graphql.Middleware.Authz instead)
+  # ------------------------------------------------------------
+  pipeline :authorize do
+    plug PRZMAWeb.Plugs.Authorize
+  end
+
+  # ------------------------------------------------------------
   # OpenAPI
   # ------------------------------------------------------------
   pipeline :openapi do
@@ -65,7 +73,8 @@ defmodule PRZMAWeb.Router do
   scope "/api/v1", PRZMAWeb do
     pipe_through [
       :api,
-      :require_did_auth
+      :require_did_auth,
+      :authorize
     ]
 
     # Registration
@@ -116,13 +125,13 @@ defmodule PRZMAWeb.Router do
   #   ↓
   # KeycloakAuth
   #   ↓
-  # conn.assigns.did
-  # conn.assigns.tenant_uuid
-  # conn.assigns.roles
+  # conn.assigns.did / tenant_uuid / auth_method / sid
   #   ↓
-  # :graphql_context
+  # :graphql_context  (roles from przma_authz tables)
   #   ↓
   # Absinthe context
+  #   ↓
+  # Middleware.Authz  (scope, feature, session, rate limit)
   #   ↓
   # GraphQL Resolver
   #

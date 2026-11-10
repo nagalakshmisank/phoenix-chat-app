@@ -19,6 +19,15 @@ defmodule Przma.Application do
       # rotation). See lib/przma/auth/jwks_cache.ex.
       Przma.Auth.JwksCache,
       Przma.CommonsCas.Repo,
+      # Authorisation scope: central Postgres tables (schema przma_authz on
+      # the Olimyam server), the 60 s access cache, usage/rate counters and
+      # background writes for security events and audit rows.
+      Przma.Authz.Repo,
+      Przma.Authz.Cache,
+      {Task.Supervisor, name: Przma.Authz.TaskSupervisor},
+      Przma.Authz.Telemetry,
+      # Inserts any API missing from przma_authz.api_endpoints (runs once).
+      Supervisor.child_spec({Task, &Przma.Authz.Endpoints.sync/0}, id: :authz_endpoint_sync, restart: :temporary),
       # LanceDB doc store: one writer process per user (started on demand)
       # and the background compactor. See lib/przma/storage/.
       {Registry, keys: :unique, name: Przma.Storage.DocWriterRegistry},

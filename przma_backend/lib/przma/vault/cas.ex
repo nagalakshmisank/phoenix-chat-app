@@ -44,11 +44,13 @@ defmodule Przma.Vault.Cas do
   @spec put(actor :: map(), uri :: PzdbUri.t(), bytes :: binary()) ::
           {:ok, String.t()} | {:error, term()}
   def put(actor, %PzdbUri{} = uri, bytes) when is_binary(bytes) do
-    with :ok <- PzdbAuthorization.authorize(actor, uri, :write) do
+    with :ok <- PzdbAuthorization.authorize(actor, uri, :write),
+         # Storage quota of the OWNER of the space (przma_authz.storage_usage).
+         :ok <- Przma.Authz.check_quota(uri.did, byte_size(bytes)) do
       digest = hash(bytes)
       key = cas_key(uri, digest)
 
-      case ExAws.S3.put_object(bucket(), key, bytes) |> ExAws.request(s3_opts()) do
+      case ExAws.S3.put_object(bucket(uri), key, bytes) |> ExAws.request(s3_opts()) do
         {:ok, _} -> {:ok, digest}
         {:error, reason} -> {:error, reason}
       end
@@ -60,7 +62,7 @@ defmodule Przma.Vault.Cas do
           {:ok, binary()} | {:error, term()}
   def get(actor, %PzdbUri{} = uri, digest) do
     with :ok <- PzdbAuthorization.authorize(actor, uri, :read) do
-      case ExAws.S3.get_object(bucket(), cas_key(uri, digest)) |> ExAws.request(s3_opts()) do
+      case ExAws.S3.get_object(bucket(uri), cas_key(uri, digest)) |> ExAws.request(s3_opts()) do
         {:ok, %{body: body}} -> {:ok, body}
         {:error, {:http_error, 404, _}} -> {:error, :not_found}
         {:error, reason} -> {:error, reason}
@@ -84,7 +86,7 @@ defmodule Przma.Vault.Cas do
       expires_in = Keyword.get(opts, :expires_in, 300)
       config = ExAws.Config.new(:s3, s3_opts())
 
-      case ExAws.S3.presigned_url(config, :get, bucket(), cas_key(uri, digest), expires_in: expires_in) do
+      case ExAws.S3.presigned_url(config, :get, bucket(uri), cas_key(uri, digest), expires_in: expires_in) do
         {:ok, url} -> {:ok, url}
         {:error, reason} -> {:error, reason}
       end
@@ -102,7 +104,8 @@ defmodule Przma.Vault.Cas do
 
   defp sanitize(did), do: String.replace(did, [":", " "], "_")
 
-  defp bucket, do: vault_config(:s3_bucket)
+  # Per-user bucket: tier1 perkeep, tier2 przma-<uuid> (Przma.Storage.Location).
+  defp bucket(%PzdbUri{did: did}), do: Przma.Storage.Location.bucket_for(did)
 
   defp s3_opts do
     [

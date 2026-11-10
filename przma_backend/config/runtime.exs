@@ -11,7 +11,14 @@ end
 
 config :przma, :keycloak,
   url: System.get_env("KEYCLOAK_URL", "http://172.235.18.126:8180"),
-  realm: System.get_env("KEYCLOAK_REALM", "przma")
+  realm: System.get_env("KEYCLOAK_REALM", "przma"),
+  # Accepted token issuers (comma separated). Empty = <KEYCLOAK_URL>/realms/<realm>.
+  issuers:
+    (System.get_env("KEYCLOAK_ISSUERS", "") |> String.split(",", trim: true) |> Enum.map(&String.trim/1)),
+  # Optional: a service-account client allowed to change users' tier roles
+  # (Przma.Authz.KeycloakAdmin). Unset = tier roles are not changed in Keycloak.
+  admin_client_id: System.get_env("KEYCLOAK_ADMIN_CLIENT_ID"),
+  admin_client_secret: System.get_env("KEYCLOAK_ADMIN_CLIENT_SECRET")
 
 config :przma, :vault,
   base_path: System.get_env("VAULT_BASE_PATH", "s3://perkeep"),
@@ -66,3 +73,32 @@ config :przma, :lance_doc,
 config :przma, :search,
   # index uploaded text/PDF files in the background after upload (Files.upload)
   auto_index: System.get_env("SEARCH_AUTO_INDEX", "false") == "true"
+
+# ── Authorisation scope (Przma.Authz) ───────────────────────────────────
+# Central tables live in schema przma_authz of the Olimyam Postgres:
+#   export AUTHZ_DATABASE_URL='postgresql://app_user:<password>@db:5432/postgres'
+# (falls back to DATABASE_URL from ~/olimyam-connection.txt).
+# AUTHZ_DB_SSL=true when the server requires SSL.
+authz_url = System.get_env("AUTHZ_DATABASE_URL") || System.get_env("DATABASE_URL")
+
+if authz_url do
+  config :przma, Przma.Authz.Repo,
+    url: authz_url,
+    ssl: System.get_env("AUTHZ_DB_SSL", "false") == "true",
+    pool_size: String.to_integer(System.get_env("AUTHZ_POOL_SIZE", "10"))
+else
+  config :przma, Przma.Authz.Repo,
+    hostname: System.get_env("AUTHZ_DB_HOST", "db"),
+    port: String.to_integer(System.get_env("AUTHZ_DB_PORT", "5432")),
+    database: System.get_env("AUTHZ_DB_NAME", "postgres"),
+    username: System.get_env("AUTHZ_DB_USER", "app_user"),
+    password: System.get_env("AUTHZ_DB_PASSWORD"),
+    pool_size: String.to_integer(System.get_env("AUTHZ_POOL_SIZE", "10"))
+end
+
+config :przma, :authz,
+  # enforce | log | off (tests default to off: they have no authz database)
+  mode: System.get_env("AUTHZ_MODE", if(config_env() == :test, do: "off", else: "enforce")),
+  profile_ttl_ms: String.to_integer(System.get_env("AUTHZ_CACHE_MS", "60000")),
+  tier_plans: %{1 => "free", 2 => "premium"},
+  key_abuse_threshold: String.to_integer(System.get_env("AUTHZ_KEY_ABUSE_THRESHOLD", "50"))

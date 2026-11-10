@@ -172,7 +172,9 @@ defmodule PRZMA.PzDb do
 
     case String.split(rest, "/") do
       [did, service, space, table | _] ->
-        base = Enum.join([global_base(), seg(did), seg(service), seg(space)], "/")
+        # Per-user base path: tier1 s3://perkeep, tier2 s3://przma-<uuid>
+        # (Przma.Storage.Location, from przma_authz.storage_locations).
+        base = Enum.join([Przma.Storage.Location.base_for(did), seg(did), seg(service), seg(space)], "/")
         {base, seg(table)}
 
       parts ->

@@ -23,7 +23,9 @@ defmodule PRZMAWeb.UserSocket do
           tenant_uuid: claims["sub"],
           storage_tier: 1,
           token_claims: claims,
-          roles: []
+          roles: [],
+          auth_method: :jwt,
+          sid: claims["sid"]
         }
 
         socket =

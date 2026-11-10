@@ -8,6 +8,7 @@ defmodule PRZMAWeb.Graphql.Schema do
   import_types PRZMAWeb.Graphql.Types.CircleTypes
   import_types PRZMAWeb.Graphql.Types.SocialTypes
   import_types PRZMAWeb.Graphql.Types.CalendarTypes
+  import_types PRZMAWeb.Graphql.Types.AuthzTypes
   alias PRZMAWeb.Graphql.Resolvers.{ProfileResolver, FilesResolver, RegistrationResolver}
 
   # The chat / circle / social services return documents (decoded doc_json), whose
@@ -15,6 +16,16 @@ defmodule PRZMAWeb.Graphql.Schema do
   # up by atom (:thread_key). This makes the default lookup accept both, so
   # those types need no per-field resolver. Existing atom-keyed results
   # (profile, files) behave exactly as before.
+  # Authorisation scope: every root query and mutation goes through
+  # PRZMAWeb.Graphql.Middleware.Authz first (scope, feature, session,
+  # rate limit — see Przma.Authz). Subscriptions keep their own checks
+  # in `config` below.
+  # Introspection (__schema, __type, __typename) stays open so GraphiQL
+  # can load the docs.
+  def middleware(middleware, %{identifier: field}, %{identifier: root})
+      when root in [:query, :mutation] and field not in [:__schema, :__type, :__typename],
+      do: [{PRZMAWeb.Graphql.Middleware.Authz, field} | middleware]
+
   def middleware([{Absinthe.Middleware.MapGet, key}], _field, _object),
     do: [{{__MODULE__, :get_field}, key}]
 
@@ -37,6 +48,7 @@ defmodule PRZMAWeb.Graphql.Schema do
     import_fields :circle_queries
     import_fields :social_queries
     import_fields :calendar_queries
+    import_fields :authz_queries
 
     @desc "The caller's profile (vault namespace, private space)."
     field :profile, :profile do
@@ -75,6 +87,7 @@ defmodule PRZMAWeb.Graphql.Schema do
     import_fields :circle_mutations
     import_fields :social_mutations
     import_fields :calendar_mutations
+    import_fields :authz_mutations
 
     @desc """
     Call once right after Keycloak sign-up (safe to repeat). Creates the

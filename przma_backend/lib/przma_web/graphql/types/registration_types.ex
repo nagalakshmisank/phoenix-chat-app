@@ -11,6 +11,8 @@ defmodule PRZMAWeb.Graphql.Types.RegistrationTypes do
     field :database, :string
     @desc "The user's storage folder in S3, e.g. s3://perkeep/did_przma_kc_user1/"
     field :storage_path, :string
+    @desc "Plan from the central authorisation tables: free (tier1) | premium (tier2)"
+    field :plan, :string
     field :profile, :profile
   end
 end

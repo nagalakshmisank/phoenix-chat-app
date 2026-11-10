@@ -8,7 +8,8 @@ defmodule PRZMAWeb.Graphql.Resolvers.RegistrationResolver do
       did: did,
       tenant_uuid: context.tenant_uuid,
       storage_tier: context.storage_tier,
-      token_claims: context.token_claims
+      token_claims: context.token_claims,
+      ip: context[:client_ip]
     }
 
     with {:ok, result} <- Registration.complete(identity, args[:nickname]),

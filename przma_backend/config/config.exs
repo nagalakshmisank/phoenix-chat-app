@@ -16,8 +16,30 @@ config :przma, :vault_nif_adapter, Przma.Vault.LanceLinodeAdapter
 # Ecto: the commons Postgres database (public-file CAS copy). Connection
 # settings are in runtime.exs; migrations live in priv/commons_cas/migrations.
 #   mix ecto.migrate -r Przma.CommonsCas.Repo
-config :przma, ecto_repos: [Przma.CommonsCas.Repo]
+config :przma, ecto_repos: [Przma.CommonsCas.Repo, Przma.Authz.Repo]
 config :przma, Przma.CommonsCas.Repo, priv: "priv/commons_cas"
+
+# Ecto: authorisation scope tables (schema przma_authz). Connection in
+# runtime.exs; migrations in priv/authz/migrations:
+#   mix ecto.migrate -r Przma.Authz.Repo
+# Every connection runs SET search_path TO przma_authz, so this repo's own
+# schema_migrations table is created inside przma_authz too (nothing goes
+# into public or Supabase's schemas). The schema must exist first:
+#   psql "$AUTHZ_DATABASE_URL" -c "create schema if not exists przma_authz;"
+config :przma, Przma.Authz.Repo,
+  priv: "priv/authz",
+  after_connect: {Postgrex, :query!, ["SET search_path TO przma_authz", []]}
+
+# Authorisation scope settings (runtime.exs reads the env vars).
+config :przma, :authz,
+  # "enforce" | "log" | "off" — see Przma.Authz
+  mode: "enforce",
+  # access profile / session / key / location cache
+  profile_ttl_ms: 60_000,
+  # Keycloak tier role -> plan for new users (tier3 is treated as 2 for now)
+  tier_plans: %{1 => "free", 2 => "premium"},
+  # denied calls with one access key in 10 minutes before it is revoked
+  key_abuse_threshold: 50
 
 # {namespace, table} pairs stored in the LanceDB DOC STORE (see
 # Przma.Vault.BackendRouter + Przma.Vault.LanceDocAdapter). Each pair is one
