@@ -60,7 +60,8 @@ defmodule Przma.MixProject do
       # which only exists on OTP 27+. This container runs OTP 26
       # (erts-14.2.5.12), so anything >= 2.2 crashes
       # PRZMAWeb.Endpoint on boot with an UndefinedFunctionError.
-      {:ranch, "~> 2.1.0", override: true}
+      {:ranch, "~> 2.1.0", override: true},
+      {:cowboy, "~> 2.12.0", override: true}
     ]
   end
 end
