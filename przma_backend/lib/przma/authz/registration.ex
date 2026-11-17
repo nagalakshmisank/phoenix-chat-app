@@ -9,11 +9,11 @@ defmodule Przma.Authz.Registration do
       workspaces         personal workspace
       workspace_members  user = owner
       entitlements       the plan's features (source 'plan')
-      storage_locations  tier1: s3://perkeep (ready) · tier2: s3://przma-<uuid> (provisioning)
+      storage_locations  own bucket s3://przma-<uuid> for every user (provisioning -> ready)
       storage_usage      0 bytes used, quota from the plan
       audit_log          user.registered
 
-  Then (outside the transaction) the tier2 bucket is created and the
+  Then (outside the transaction) the user's bucket is created and the
   row marked ready. The account stays `pending_setup` until
   Przma.Vault.Registration has written the profile and default calendar,
   then activate/1 sets it `active`.
@@ -179,27 +179,27 @@ defmodule Przma.Authz.Registration do
     end
   end
 
-  # Tier1 -> perkeep. Tier2 -> own bucket, unless the user already has data
-  # in perkeep (registered before this release): then stay on perkeep.
-  defp storage_plan(_did, 1, sub), do: {:ok, Location.plan_for(1, sub)}
-
-  defp storage_plan(did, 2, sub) do
+  # Every user gets their own bucket at registration (free 5 GB, premium
+  # 10 GB: the quota comes from the plan, the bucket is the same). Users who
+  # already have data in perkeep (registered before this release) stay on
+  # perkeep until an admin runs adminMigrateStorage.
+  defp storage_plan(did, tier, sub) do
     case Location.has_data?(Location.default_bucket(), did) do
       false ->
-        {:ok, Location.plan_for(2, sub)}
+        {:ok, Location.plan_for(tier, sub)}
 
       true ->
-        Logger.warning("Authz: #{did} is tier2 but already has data in perkeep; keeping perkeep until migrated")
+        Logger.warning("Authz: #{did} already has data in perkeep; keeping perkeep until migrated")
 
         Telemetry.audit(%{
           actor: "system:registration",
           action: "storage.migration_needed",
           target_type: "account",
           target_id: did,
-          after: %{from_bucket: Location.default_bucket(), to_bucket: Location.tier2_bucket(sub)}
+          after: %{from_bucket: Location.default_bucket(), to_bucket: Location.user_bucket(sub)}
         })
 
-        {:ok, Map.put(Location.plan_for(1, sub), :tier, 2)}
+        {:ok, %{tier: tier, bucket: Location.default_bucket(), base_path: Location.default_base(), status: "ready"}}
 
       {:error, reason} ->
         {:error, {:storage_check_failed, reason}}

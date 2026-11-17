@@ -188,16 +188,20 @@ defmodule Przma.Authz.Admin do
 
   # ── helpers ───────────────────────────────────────────────────────────
 
-  # Only upgrades move data automatically (tier1 -> tier2). A downgrade
-  # keeps the user's own bucket until an admin decides.
+  # Same bucket on every plan: an upgrade only raises the quota (done in
+  # set_plan). The only move is a legacy user still in the shared perkeep
+  # bucket, who is copied to their own bucket. The tier label is updated.
   defp maybe_move_storage(admin_did, did, new_tier, sub) do
-    case Location.location(did) do
-      %{storage_tier: 1} when new_tier == 2 ->
-        start_migration(admin_did, did, 2, sub)
-        "migrating to own bucket"
+    Db.exec("UPDATE przma_authz.storage_locations SET storage_tier = $2, updated_at = now() WHERE did = $1", [did, new_tier])
+    Cache.invalidate(did)
 
-      %{storage_tier: t} ->
-        "unchanged (tier #{t})"
+    case Location.location(did) do
+      %{bucket: bucket} when bucket == "perkeep" or bucket == nil ->
+        start_migration(admin_did, did, new_tier, sub)
+        "migrating from shared bucket to own bucket"
+
+      %{bucket: bucket} ->
+        "same bucket #{bucket}, quota updated"
 
       _ ->
         "no storage row"

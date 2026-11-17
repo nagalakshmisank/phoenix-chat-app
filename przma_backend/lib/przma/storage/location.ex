@@ -3,8 +3,10 @@ defmodule Przma.Storage.Location do
   Where one user's data lives (tier1 / tier2), from the central table
   `przma_authz.storage_locations`.
 
-      tier 1  bucket perkeep (shared)        base s3://perkeep
-      tier 2  bucket przma-<keycloak uuid>   base s3://przma-<keycloak uuid>
+      every user  bucket przma-<keycloak uuid>   base s3://przma-<keycloak uuid>
+                  free = 5 GB quota, premium = 10 GB quota (same bucket)
+      legacy      users registered before this change stay in perkeep
+                  until an admin runs adminMigrateStorage
 
   Inside the bucket the layout is unchanged:
       {base}/did_przma_<user>/<service>/<space>/<table>.lance
@@ -78,14 +80,16 @@ defmodule Przma.Storage.Location do
   end
 
   @doc "Row values for a new user of `tier` (1 or 2)."
-  def plan_for(1, _keycloak_uuid), do: %{tier: 1, bucket: default_bucket(), base_path: default_base(), status: "ready"}
-
-  def plan_for(2, keycloak_uuid) do
-    bucket = tier2_bucket(keycloak_uuid)
-    %{tier: 2, bucket: bucket, base_path: "s3://" <> bucket, status: "provisioning"}
+  # Every user (free or premium) gets their OWN bucket. `tier` only records
+  # the plan level; an upgrade changes the quota, never the bucket.
+  def plan_for(tier, keycloak_uuid) when tier in [1, 2] do
+    bucket = user_bucket(keycloak_uuid)
+    %{tier: tier, bucket: bucket, base_path: "s3://" <> bucket, status: "provisioning"}
   end
 
-  def tier2_bucket(keycloak_uuid), do: "przma-" <> String.downcase(keycloak_uuid)
+  def user_bucket(keycloak_uuid), do: "przma-" <> String.downcase(keycloak_uuid)
+  # kept for old callers
+  def tier2_bucket(keycloak_uuid), do: user_bucket(keycloak_uuid)
 
   @doc """
   Creates a tier2 bucket and marks the row ready. Safe to repeat
@@ -132,7 +136,7 @@ defmodule Przma.Storage.Location do
          target = plan_for(to_tier, keycloak_uuid),
          true <- target.bucket != from_bucket || {:error, :already_there},
          :ok <- set_status(did, "migrating"),
-         :ok <- (to_tier == 1 && :ok) || create_bucket(target.bucket),
+         :ok <- create_bucket(target.bucket),
          {:ok, copied} <- copy_folder(did, from_bucket, target.bucket) do
       :ok =
         Db.exec(
@@ -170,7 +174,7 @@ defmodule Przma.Storage.Location do
   # ── S3 ────────────────────────────────────────────────────────────────
 
   def create_bucket(bucket) do
-    case ExAws.S3.put_bucket(bucket, region()) |> ExAws.request(s3_opts()) do
+    case ExAws.S3.put_bucket(bucket, System.get_env("S3_BUCKET_LOCATION", "us-east-1")) |> ExAws.request(s3_opts()) do
       {:ok, _} -> :ok
       {:error, {:http_error, 409, _}} -> :ok
       {:error, reason} -> {:error, reason}
@@ -185,13 +189,17 @@ defmodule Przma.Storage.Location do
         ExAws.S3.list_objects_v2(from, prefix: prefix)
         |> ExAws.stream!(s3_opts())
         |> Enum.reduce(0, fn %{key: key}, n ->
-          {:ok, _} = ExAws.S3.put_object_copy(to, key, from, key) |> ExAws.request(s3_opts())
-          n + 1
+          case ExAws.S3.put_object_copy(to, key, from, key) |> ExAws.request(s3_opts()) do
+            {:ok, _} -> n + 1
+            {:error, reason} -> throw({:copy_failed, key, reason})
+          end
         end)
 
       {:ok, count}
     rescue
       e -> {:error, e}
+    catch
+      {:copy_failed, key, reason} -> {:error, {:copy_failed, key, reason}}
     end
   end
 
