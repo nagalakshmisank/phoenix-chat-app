@@ -154,4 +154,12 @@ defmodule PRZMAWeb.Router do
       schema: PRZMAWeb.Graphql.Schema,
       interface: :playground
   end
+
+  ```elixir
+  # DEMO console (only active when DEMO_MODE=true). Remove for production.
+  scope "/demo", PRZMAWeb do
+    get "/", DemoController, :page
+    post "/login", DemoController, :login
+  end
+  ```
 end

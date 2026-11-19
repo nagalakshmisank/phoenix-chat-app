@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRZMA Backend Demo Console</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1c2330; --mute:#667085; --line:#e4e7ec; --brand:#3b5bdb; --ok:#1a7f4b; --okbg:#e6f6ee; --bad:#b42318; --badbg:#fdecea; --warn:#9a6700; --warnbg:#fff6d6; --gray:#eef0f3; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 20px; display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
+  header h1 { font-size:17px; margin:0 12px 0 0; } header h1 span { color:var(--brand); }
+  input, select, button, textarea { font:inherit; }
+  input, select { padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:#fff; max-width:100%; }
+  input[type=password] { width:130px; } input.u { width:130px; }
+  button { padding:7px 13px; border:1px solid var(--brand); background:var(--brand); color:#fff; border-radius:6px; cursor:pointer; }
+  button.alt { background:#fff; color:var(--brand); } button.sm { padding:3px 9px; font-size:12px; }
+  button.danger { background:#fff; color:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .chip { display:inline-block; padding:2px 9px; border-radius:99px; font-size:12px; background:var(--line); margin:2px 4px 2px 0; }
+  .chip.ok { background:var(--okbg); color:var(--ok); } .chip.bad { background:var(--badbg); color:var(--bad); } .chip.warn { background:var(--warnbg); color:var(--warn); } .chip.gray { background:var(--gray); color:var(--mute); }
+  nav { display:flex; gap:4px; padding:12px 20px 0; flex-wrap:wrap; }
+  nav button { background:transparent; color:var(--mute); border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0; }
+  nav button.on { background:var(--card); color:var(--ink); border-color:var(--line); font-weight:600; }
+  main { margin:0 20px 20px; background:var(--card); border:1px solid var(--line); border-radius:0 8px 8px 8px; padding:18px; min-height:330px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; }
+  .box { border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .box h3, h4.t { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mute); }
+  h4.t { margin-top:18px; }
+  .big { font-size:20px; font-weight:600; word-break:break-all; }
+  .bar { height:12px; background:var(--line); border-radius:99px; overflow:hidden; margin:8px 0 4px; } .bar > div { height:100%; background:var(--brand); }
+  table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--mute); font-weight:600; position:sticky; top:0; background:#fff; }
+  tr.sel td { background:#eef2ff; } tr.pick { cursor:pointer; } tr.pick:hover td { background:#f7f8fb; }
+  .scroll { max-height:420px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0; }
+  .note { color:var(--mute); font-size:12.5px; }
+  .res { padding:8px 12px; border-radius:6px; margin-top:8px; font-size:13px; word-break:break-word; }
+  .res.ok { background:var(--okbg); color:var(--ok); } .res.bad { background:var(--badbg); color:var(--bad); } .res.info { background:var(--warnbg); color:var(--warn); }
+  details { margin:0 20px 24px; } summary { cursor:pointer; color:var(--mute); }
+  pre { background:#101828; color:#d0d5dd; padding:12px; border-radius:8px; overflow:auto; max-height:260px; font-size:12px; }
+  .msg { padding:6px 10px; border-radius:10px; margin:4px 0; max-width:75%; } .msg.out { background:#e7edff; margin-left:auto; } .msg.in { background:#f1f2f4; }
+  hr { border:0; border-top:1px solid var(--line); margin:18px 0; }
+  .add { color:var(--ok); } .rem { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PRZMA <span>Backend Demo</span></h1>
+  <input class="u" id="user" list="users" placeholder="username" autocomplete="off">
+  <datalist id="users"></datalist>
+  <input id="pass" type="password" placeholder="password" autocomplete="off">
+  <button id="loginBtn">Log in</button>
+  <span id="who" class="note">Not logged in</span>
+</header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+<details><summary>Last request and response (what the backend actually returned)</summary><pre id="log">nothing yet</pre></details>
+
+<script>
+"use strict";
+// The 118 API rules, copied from lib/przma/authz/endpoints.ex: [kind, name, scope, feature, rate per minute]
+const ENDPOINTS = [["mutation","completeRegistration","auth:register",null,10],["query","profile","profile:rw",null,120],["mutation","createProfile","profile:rw",null,30],["mutation","updateProfile","profile:rw",null,30],["query","myAccess","profile:rw",null,120],["query","mySessions","profile:rw",null,60],["mutation","revokeMySession","profile:rw",null,30],["query","myAccessKeys","keys:manage","keys.access_keys",60],["mutation","createAccessKey","keys:manage","keys.access_keys",10],["mutation","revokeAccessKey","keys:manage","keys.access_keys",30],["query","adminAccount","admin:*",null,120],["query","adminSecurityEvents","admin:*",null,120],["mutation","adminSetPlan","admin:*",null,60],["mutation","adminSetAccountStatus","admin:*",null,60],["mutation","adminRevokeSessions","admin:*",null,60],["mutation","adminGrantFeature","admin:*",null,60],["mutation","adminMigrateStorage","admin:*",null,10],["query","files","files:rw",null,120],["query","commonsCasStatus","files:rw",null,30],["query","casMeta","files:rw",null,120],["query","blobDownloadUrl","files:rw",null,120],["mutation","uploadFile","files:rw","files.upload",30],["mutation","uploadBlob","files:rw","files.upload",30],["mutation","syncFileRecord","files:rw","files.upload",60],["query","threads","social:rw","social.chat",120],["query","unreadCount","social:rw","social.chat",240],["query","conversation","social:rw","social.chat",240],["query","inbox","social:rw","social.chat",240],["query","outbox","social:rw","social.chat",120],["query","message","social:rw","social.chat",240],["query","messageBlobUrl","social:rw","social.chat",120],["mutation","sendMessage","social:rw","social.chat",60],["mutation","deleteMessage","social:rw","social.chat",60],["mutation","saveMessageToVault","social:rw","social.chat",30],["mutation","markThreadRead","social:rw","social.chat",120],["mutation","markAllRead","social:rw","social.chat",60],["mutation","muteThread","social:rw","social.chat",60],["mutation","unmuteThread","social:rw","social.chat",60],["query","myCircles","social:rw","social.chat",120],["query","circle","social:rw","social.chat",120],["query","circleMembers","social:rw","social.chat",120],["query","pendingMembers","social:rw","social.chat",120],["query","circleMessages","social:rw","social.chat",240],["query","circlePins","social:rw","social.chat",120],["query","discoverCircles","social:rw","social.chat",60],["mutation","createCircle","social:rw","social.chat",20],["mutation","updateCircle","social:rw","social.chat",30],["mutation","deleteCircle","social:rw","social.chat",20],["mutation","joinCircle","social:rw","social.chat",30],["mutation","leaveCircle","social:rw","social.chat",30],["mutation","approveMember","social:rw","social.chat",60],["mutation","denyMember","social:rw","social.chat",60],["mutation","addMember","social:rw","social.chat",60],["mutation","removeMember","social:rw","social.chat",60],["mutation","muteMember","social:rw","social.chat",60],["mutation","updateMemberRole","social:rw","social.chat",60],["mutation","transferOwnership","social:rw","social.chat",10],["mutation","sendCircleMessage","social:rw","social.chat",60],["mutation","deleteCircleMessage","social:rw","social.chat",60],["mutation","pinMessage","social:rw","social.chat",30],["mutation","unpinMessage","social:rw","social.chat",30],["mutation","followCircle","social:rw","social.chat",30],["mutation","circleTyping","social:rw","social.chat",240],["query","contacts","social:rw",null,120],["query","contact","social:rw",null,120],["query","contactTypes","social:rw",null,60],["query","lookupUser","social:rw",null,60],["query","followers","social:rw",null,60],["query","following","social:rw",null,60],["query","contactSuggestions","social:rw",null,60],["query","notifications","social:rw",null,120],["query","notificationSettings","social:rw",null,60],["mutation","addContact","social:rw",null,30],["mutation","addContactFromFollower","social:rw",null,30],["mutation","removeContact","social:rw",null,30],["mutation","classifyContact","social:rw",null,30],["mutation","createContactType","social:rw",null,20],["mutation","followUser","social:rw",null,30],["mutation","unfollowUser","social:rw",null,30],["mutation","dismissSuggestion","social:rw",null,30],["mutation","markNotificationsRead","social:rw",null,60],["mutation","updateNotificationSettings","social:rw",null,30],["query","myCalendars","calendar:read","calendar.basic",120],["query","calendar","calendar:read","calendar.basic",120],["query","calendarShares","calendar:read","calendar.basic",60],["query","calendarEvents","calendar:read","calendar.basic",120],["query","myAgenda","calendar:read","calendar.basic",120],["query","calendarEvent","calendar:read","calendar.basic",120],["query","eventInvites","calendar:read","calendar.basic",60],["query","holidays","calendar:read","calendar.basic",60],["mutation","createCalendar","calendar:rw","calendar.basic",20],["mutation","updateCalendar","calendar:rw","calendar.basic",30],["mutation","archiveCalendar","calendar:rw","calendar.basic",20],["mutation","shareCalendarWithUser","calendar:rw","calendar.basic",30],["mutation","shareCalendarWithCircle","calendar:rw","calendar.basic",30],["mutation","unshareCalendar","calendar:rw","calendar.basic",30],["mutation","createEvent","calendar:rw","calendar.basic",60],["mutation","updateEvent","calendar:rw","calendar.basic",60],["mutation","cancelEvent","calendar:rw","calendar.basic",60],["mutation","skipOccurrence","calendar:rw","calendar.basic",60],["mutation","inviteToEvent","calendar:rw","calendar.basic",30],["mutation","rsvpEvent","calendar:rw","calendar.basic",60],["mutation","removeInvite","calendar:rw","calendar.basic",30],["mutation","setPrivateNote","calendar:rw","calendar.basic",60],["mutation","createPoll","calendar:plus","calendar.polls",20],["mutation","createShareLink","calendar:plus","calendar.share_links",20],["mutation","setWorkingHours","calendar:business","calendar.business",20],["query","freeBusy","calendar:business","calendar.business",60],["query","commonFreeSlots","calendar:business","calendar.business",60],["mutation","createBookingPage","calendar:booking","calendar.booking",10],["query","bookings","calendar:booking","calendar.booking",60],["rest","POST /api/v1/registration/complete","auth:register",null,10],["rest","POST /api/v1/profile","profile:rw",null,30],["rest","GET /api/v1/profile","profile:rw",null,120],["rest","PATCH /api/v1/profile","profile:rw",null,30],["rest","GET /api/v1/search","search:read",null,60],["rest","POST /api/v1/search/index","search:read",null,20],["rest","GET /api/v1/search/stats","search:read",null,60]];
+// Registered in the table but no GraphQL field exists in this code yet.
+const NOT_BUILT = new Set(["createPoll","createShareLink","setWorkingHours","freeBusy","commonFreeSlots","createBookingPage","bookings"]);
+const POLL_MS = window.__POLL_MS || 4000, POLL_MAX = window.__POLL_MAX || 22;
+
+let token = null, claims = null, me = null;
+const saved = {};   // users saved for the comparison view
+const $ = (s, r=document) => r.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const chips = (a, cls="") => (a||[]).map(x => `<span class="chip ${cls}">${esc(x)}</span>`).join("") || '<span class="note">none</span>';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function bytes(n) { n = Number(n||0); const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1024 && i<4){n/=1024;i++;} return n.toFixed(i?2:0)+" "+u[i]; }
+const pad = n => String(n).padStart(2,"0");
+// Local clock time with a fixed +05:30 offset (the demo runs in IST).
+const ist = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}+05:30`;
+function dayStart(off=0){ const d=new Date(); d.setDate(d.getDate()+off); d.setHours(0,0,0,0); return ist(d); }
+const localInput = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const DAYS = ["SU","MO","TU","WE","TH","FR","SA"];
+
+for (let i=1;i<=15;i++) $("#users").insertAdjacentHTML("beforeend", `<option value="pz_basic${i}">`);
+
+async function gql(query, variables) {
+  const r = await fetch("/api/graphql", { method:"POST", headers:{ "Content-Type":"application/json", "Authorization":"Bearer "+token }, body: JSON.stringify({ query, variables }) });
+  const text = await r.text();
+  let j; try { j = JSON.parse(text); } catch { j = { errors:[{ message:"HTTP "+r.status+": "+text.slice(0,200) }] }; }
+  $("#log").textContent = "REQUEST\n" + query.trim() + "\n" + (variables ? JSON.stringify(variables) : "") + "\n\nRESPONSE (HTTP " + r.status + ")\n" + JSON.stringify(j, null, 2);
+  return j;
+}
+function errBox(j) {
+  const e = (j.errors||[])[0]; if (!e) return "";
+  const x = e.extensions || {};
+  const extra = Object.entries(x).filter(([k])=>k!=="status").map(([k,v])=>`${k}: ${typeof v==="object"?JSON.stringify(v):v}`).join(" · ");
+  return `<div class="res bad"><b>DENIED / ERROR</b> — ${esc(e.message)}${extra?"<br>"+esc(extra):""}</div>`;
+}
+const okBox = t => `<div class="res ok">${t}</div>`;
+const needLogin = () => '<p class="note">Log in first (top right).</p>';
+
+const ACCESS_Q = `{ did status plan roles scopes features
+  storage { tier bucket basePath status }
+  sessionPolicy { maxSessionSeconds idleTimeoutSeconds maxDevices maxKeyDays }
+  quotaBytes usedBytes usedPercent authMethod }`;
+async function loadMe() { const j = await gql(`{ myAccess ${ACCESS_Q} }`); me = j.errors ? null : j.data.myAccess; return j; }
+
+// ---------- login ----------
+$("#loginBtn").onclick = async () => {
+  const username = $("#user").value.trim(), password = $("#pass").value;
+  if (!username || !password) return;
+  $("#who").textContent = "Logging in...";
+  try {
+    const r = await fetch("/demo/login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ username, password }) });
+    const j = await r.json();
+    if (!j.access_token) { $("#who").innerHTML = `<span class="chip bad">${esc(j.error_description || j.error || "login failed")}</span>`; return; }
+    token = j.access_token;
+    claims = JSON.parse(atob(token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/")));
+    $("#pass").value = ""; me = null; calState = {};
+    tick(); await loadMe(); tick(); show(current);
+  } catch (e) { $("#who").innerHTML = `<span class="chip bad">${esc(e.message)}</span>`; }
+};
+function tick() {
+  if (!claims) return;
+  const left = Math.max(0, claims.exp - Math.floor(Date.now()/1000));
+  const role = me ? ` ${chips(me.roles,"gray")} ${chips([me.plan],"warn")}` : "";
+  $("#who").innerHTML = `<span class="chip ok">${esc(claims.preferred_username)}</span>${role} token ${left}s` + (left===0 ? ' <span class="chip bad">expired — log in again</span>' : "");
+}
+setInterval(tick, 1000);
+const myDid = () => "did:przma:" + (claims?.preferred_username || "");
+
+// ---------- tabs ----------
+const TABS = { access:"Access & Storage", gating:"Feature gating", plans:"Plans & upgrade", calendar:"Calendar", chat:"Chat", admin:"Admin" };
+let current = "access";
+const nav = $("#tabs");
+Object.entries(TABS).forEach(([k,v]) => { const b=document.createElement("button"); b.textContent=v; b.dataset.k=k; b.onclick=()=>show(k); nav.appendChild(b); });
+function show(k) { current = k; [...nav.children].forEach(b => b.classList.toggle("on", b.dataset.k===k)); $("#main").innerHTML = token ? "" : needLogin(); if (token) views[k](); }
+
+function accessCards(a) {
+  const pct = Math.min(100, Number(a.usedPercent||0));
+  return `<div class="grid">
+    <div class="box"><h3>Account</h3><div class="big">${esc(a.did)}</div><div>${chips([a.status],a.status==="active"?"ok":"bad")} ${chips([a.plan],"warn")}</div><div class="note">login via ${esc(a.authMethod)}</div></div>
+    <div class="box"><h3>Roles</h3>${chips(a.roles)}<h3 style="margin-top:12px">Session policy</h3><div class="note">max ${esc(a.sessionPolicy?.maxDevices)} devices · session ${esc(Math.round((a.sessionPolicy?.maxSessionSeconds||0)/86400))} days · key ${esc(a.sessionPolicy?.maxKeyDays)} days</div></div>
+    <div class="box"><h3>Own storage bucket</h3><div class="big">${esc(a.storage?.bucket)}</div><div>${chips([a.storage?.status], a.storage?.status==="ready"?"ok":"warn")} tier ${esc(a.storage?.tier)}</div><div class="note">${esc(a.storage?.basePath)}</div></div>
+    <div class="box"><h3>Quota</h3><div class="big">${bytes(a.usedBytes)} / ${bytes(a.quotaBytes)}</div><div class="bar"><div style="width:${pct}%"></div></div><div class="note">${pct.toFixed(2)}% used</div></div>
+  </div>
+  <div class="grid" style="margin-top:14px">
+    <div class="box"><h3>Scopes (what this role may call)</h3>${chips(a.scopes)}</div>
+    <div class="box"><h3>Features (what this plan includes)</h3>${chips(a.features)}</div>
+  </div>`;
+}
+
+// ---------- gating helpers ----------
+function verdict(ep, prof) {
+  const [kind, name, scope, feature] = ep;
+  if (NOT_BUILT.has(name)) return { ok:false, built:false, why:"not built yet" };
+  if (!prof.scopes.includes(scope)) return { ok:false, built:true, why:"role lacks scope " + scope };
+  if (feature && !prof.features.includes(feature)) return { ok:false, built:true, why:"plan lacks feature " + feature };
+  return { ok:true, built:true, why:"allowed" };
+}
+const svc = ep => ep[2].split(":")[0];
+
+const views = {
+  async access() {
+    $("#main").innerHTML = `<div class="row"><button id="reg" class="alt">Register (completeRegistration)</button><button id="ref">Refresh</button><span class="note">New user? Register first, then refresh. Safe to repeat.</span></div><div id="out"></div>`;
+    $("#reg").onclick = async () => {
+      const j = await gql(`mutation { completeRegistration { status did plan storagePath } }`);
+      $("#out").innerHTML = j.errors ? errBox(j) : okBox("Registered: " + esc(JSON.stringify(j.data.completeRegistration)));
+      setTimeout(load, 600);
+    };
+    const load = async () => { const j = await loadMe(); tick(); $("#out").innerHTML = j.errors ? errBox(j) : accessCards(me); };
+    $("#ref").onclick = load; load();
+  },
+
+  // ===== Feature gating =====
+  async gating() {
+    if (!me) { const j = await loadMe(); if (j.errors) { $("#main").innerHTML = errBox(j); return; } }
+    const services = [...new Set(ENDPOINTS.map(svc))].sort();
+    $("#main").innerHTML = `
+      <div class="grid"><div class="box"><h3>Logged in as</h3><div class="big">${esc(me.did)}</div>${chips(me.roles,"gray")} ${chips([me.plan],"warn")}</div>
+        <div class="box"><h3>Scopes (role)</h3>${chips(me.scopes)}</div><div class="box"><h3>Features (plan)</h3>${chips(me.features)}</div>
+        <div class="box"><h3>Result</h3><div id="sum" class="big"></div><div class="note">an API needs the scope AND the plan feature</div></div></div>
+      <h4 class="t">All APIs and what this user may call</h4>
+      <div class="row"><select id="fs"><option value="">all services</option>${services.map(s=>`<option>${esc(s)}</option>`).join("")}</select>
+        <select id="fv"><option value="">allowed and denied</option><option value="ok">allowed only</option><option value="no">denied only</option></select>
+        <input id="fq" placeholder="search API name"><button id="save" class="alt">Save this user to comparison</button></div>
+      <div class="scroll"><table id="tbl"></table></div>
+      <h4 class="t">Compare saved users (only APIs where the answer differs)</h4>
+      <div class="row"><span class="note">Log in as a free user, save; log in as premium, save; then business and admin. Each saved user becomes a column.</span><button id="clr" class="danger sm">Clear saved</button></div><div id="cmp"></div>
+      <h4 class="t">Live check: the real backend answer for this user</h4>
+      <div class="row" id="live"></div><div id="liveOut"></div>`;
+    const renderTable = () => {
+      const fs = $("#fs").value, fv = $("#fv").value, fq = $("#fq").value.trim().toLowerCase();
+      const all = ENDPOINTS.map(e => ({ e, v: verdict(e, me) }));
+      const okN = all.filter(x=>x.v.ok).length;
+      $("#sum").innerHTML = `${okN} of ${all.length} <span class="note">APIs allowed</span>`;
+      const rows = all.filter(x => (!fs||svc(x.e)===fs) && (!fv||(fv==="ok")===x.v.ok) && (!fq||x.e[1].toLowerCase().includes(fq)));
+      $("#tbl").innerHTML = `<tr><th>API</th><th>Type</th><th>Needs scope</th><th>Needs feature</th><th>Calls/min</th><th>This user</th></tr>` +
+        rows.map(({e,v}) => `<tr><td><b>${esc(e[1])}</b></td><td>${esc(e[0])}</td><td>${esc(e[2])}</td><td>${esc(e[3]||"-")}</td><td>${e[4]}</td><td>${v.ok ? '<span class="chip ok">ALLOWED</span>' : !v.built ? '<span class="chip gray">not built yet</span>' : `<span class="chip bad">DENIED</span> <span class="note">${esc(v.why)}</span>`}</td></tr>`).join("");
+    };
+    ["fs","fv"].forEach(id => $("#"+id).onchange = renderTable); $("#fq").oninput = renderTable; renderTable();
+    const renderCmp = () => {
+      const names = Object.keys(saved);
+      if (names.length < 2) { $("#cmp").innerHTML = `<p class="note">${names.length} user saved. Save at least two.</p>`; return; }
+      const diff = ENDPOINTS.filter(e => !NOT_BUILT.has(e[1])).map(e => ({ e, r: names.map(n => verdict(e, saved[n]).ok) })).filter(x => x.r.some(v=>v!==x.r[0]));
+      $("#cmp").innerHTML = `<div class="scroll"><table><tr><th>API</th><th>Needs</th>${names.map(n=>`<th>${esc(n)}<br><span class="note">${esc(saved[n].plan)} · ${esc(saved[n].roles.join(", "))}</span></th>`).join("")}</tr>` +
+        (diff.map(({e,r}) => `<tr><td><b>${esc(e[1])}</b></td><td class="note">${esc(e[2])}${e[3]?" + "+esc(e[3]):""}</td>${r.map(v=>`<td>${v?'<span class="chip ok">allowed</span>':'<span class="chip bad">denied</span>'}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${names.length+2}" class="note">No differences between these users.</td></tr>`) + "</table></div>";
+    };
+    $("#save").onclick = () => { saved[claims.preferred_username] = { plan:me.plan, roles:me.roles, scopes:me.scopes, features:me.features }; renderCmp(); };
+    $("#clr").onclick = () => { for (const k in saved) delete saved[k]; renderCmp(); }; renderCmp();
+    const tests = [
+      { n:"myAccess", ep:"myAccess", q:`{ myAccess { plan } }`, ok:d=>JSON.stringify(d.myAccess) },
+      { n:"myCalendars", ep:"myCalendars", q:`{ myCalendars { name } }`, ok:d=>d.myCalendars.length+" calendar(s)" },
+      { n:"createAccessKey", ep:"createAccessKey", q:`mutation { createAccessKey(name:"demo", scopes:["profile:rw"], days:1) { key accessKey { name } } }`, ok:d=>"key created (prefix "+String(d.createAccessKey.key).slice(0,8)+"…)" },
+      { n:"adminSecurityEvents", ep:"adminSecurityEvents", q:`{ adminSecurityEvents(limit:1) { eventType } }`, ok:d=>JSON.stringify(d.adminSecurityEvents) },
+    ];
+    $("#live").innerHTML = tests.map((t,i)=>`<button class="alt" data-i="${i}">Call ${esc(t.n)}</button>`).join("");
+    $("#live").querySelectorAll("button").forEach(b => b.onclick = async () => {
+      const t = tests[b.dataset.i], pred = verdict(ENDPOINTS.find(e=>e[1]===t.ep), me), j = await gql(t.q);
+      $("#liveOut").innerHTML = `<p class="note">${esc(t.n)}: table predicted <b>${pred.ok?"ALLOWED":"DENIED"}</b>. Backend answered:</p>` + (j.errors ? errBox(j) : okBox("<b>ALLOWED</b> — " + esc(t.ok(j.data))));
+    });
+  },
+
+  // ===== Plans & upgrade =====
+  plans() {
+    $("#main").innerHTML = `
+      <div class="grid">
+        <div class="box"><h3>free → basic_user</h3><div class="note">5 GB · own bucket<br>Calendar (basic), files, chat, profile, search<br>3 devices · no access keys</div></div>
+        <div class="box"><h3>premium → privileged_user</h3><div class="note">10 GB · same bucket<br>+ keys:manage, calendar:plus (polls, invite links)<br>5 devices · keys up to 90 days</div></div>
+        <div class="box"><h3>business → business_user</h3><div class="note">larger quota · same bucket<br>+ calendar:business, calendar:booking<br>10 devices · keys up to 180 days</div></div>
+        <div class="box"><h3>platform_admin</h3><div class="note">admin:* (plans, suspensions, security)<br>2 devices · no access keys</div></div></div>
+      <p class="note">Roles and features above come from the seed tables. The quota shown after each upgrade is read live from the backend.</p>
+      <h4 class="t">Upgrade a user (log in as the admin first)</h4>
+      <div class="row"><input id="pd" size="30" value="did:przma:pz_basic6">
+        <button data-p="free" class="alt">→ Free</button><button data-p="premium">→ Premium</button><button data-p="business" class="alt">→ Business</button></div>
+      <div id="pout"></div>`;
+    const diffList = (a, b) => { const A=new Set(a), B=new Set(b); return { add:[...B].filter(x=>!A.has(x)), rem:[...A].filter(x=>!B.has(x)) }; };
+    const diffCell = d => (d.add.length||d.rem.length) ? d.add.map(x=>`<span class="add">+ ${esc(x)}</span>`).concat(d.rem.map(x=>`<span class="rem">− ${esc(x)}</span>`)).join("<br>") : '<span class="note">unchanged</span>';
+    $("#main").querySelectorAll("button[data-p]").forEach(b => b.onclick = async () => {
+      const did = $("#pd").value.trim(), plan = b.dataset.p, out = $("#pout");
+      out.innerHTML = '<div class="res info">Reading the current account…</div>';
+      const before = await gql(`query($d:String!){ adminAccount(did:$d) ${ACCESS_Q} }`, { d:did });
+      if (before.errors) { out.innerHTML = errBox(before); return; }
+      const A = before.data.adminAccount;
+      out.innerHTML = `<div class="res info">Was <b>${esc(A.plan)}</b>. Changing to <b>${esc(plan)}</b>…</div>`;
+      const set = await gql(`mutation($d:String!,$p:String!){ adminSetPlan(did:$d, plan:$p) { did plan role storage } }`, { d:did, p:plan });
+      if (set.errors) { out.innerHTML = errBox(set); return; }
+      let B = null;
+      for (let i=0; i<POLL_MAX; i++) {
+        out.innerHTML = `<div class="res info">Plan set to <b>${esc(plan)}</b>. Waiting for the new role to take effect (cache up to 60 s)… ${i*POLL_MS/1000}s</div>`;
+        const r = await gql(`query($d:String!){ adminAccount(did:$d) ${ACCESS_Q} }`, { d:did });
+        if (!r.errors && r.data.adminAccount.plan === plan && JSON.stringify(r.data.adminAccount.roles) !== JSON.stringify(A.roles) || (!r.errors && plan === A.plan)) { B = r.data.adminAccount; break; }
+        await sleep(POLL_MS);
+      }
+      if (!B) { out.innerHTML = '<div class="res bad">The new role did not appear in time. Press the button again or use Admin → View account.</div>'; return; }
+      const sc = diffList(A.scopes, B.scopes), ft = diffList(A.features, B.features), ro = diffList(A.roles, B.roles);
+      out.innerHTML = okBox(`<b>${esc(did)}</b>: ${esc(A.plan)} → <b>${esc(B.plan)}</b>`) + `<table style="margin-top:10px"><tr><th></th><th>Before</th><th>After</th><th>Change</th></tr>
+        <tr><td>Plan</td><td>${esc(A.plan)}</td><td>${esc(B.plan)}</td><td></td></tr>
+        <tr><td>Roles</td><td>${chips(A.roles)}</td><td>${chips(B.roles)}</td><td>${diffCell(ro)}</td></tr>
+        <tr><td>Bucket</td><td>${esc(A.storage?.bucket)}</td><td>${esc(B.storage?.bucket)}</td><td>${A.storage?.bucket===B.storage?.bucket?'<span class="chip ok">same bucket</span>':'<span class="chip warn">changed</span>'}</td></tr>
+        <tr><td>Quota</td><td>${bytes(A.quotaBytes)}</td><td>${bytes(B.quotaBytes)}</td><td></td></tr>
+        <tr><td>Scopes</td><td class="note">${A.scopes.length}</td><td class="note">${B.scopes.length}</td><td>${diffCell(sc)}</td></tr>
+        <tr><td>Features</td><td class="note">${A.features.length}</td><td class="note">${B.features.length}</td><td>${diffCell(ft)}</td></tr>
+        <tr><td>Devices / key days</td><td>${esc(A.sessionPolicy?.maxDevices)} / ${esc(A.sessionPolicy?.maxKeyDays)}</td><td>${esc(B.sessionPolicy?.maxDevices)} / ${esc(B.sessionPolicy?.maxKeyDays)}</td><td></td></tr></table>
+        <p class="note">Now open Feature gating as that user to see the APIs that changed.</p>`;
+    });
+  },
+
+  // ===== Calendar =====
+  async calendar() { await calendarView(); },
+
+  chat() {
+    $("#main").innerHTML = `<div class="row">Chat with <input id="to" size="28" value="did:przma:pz_basic7"><button id="open" class="alt">Open conversation</button><button id="thr" class="alt">My threads</button><span id="unr" class="note"></span></div>
+      <div id="conv"></div><div class="row"><input id="txt" size="50" placeholder="message"><button id="send">Send</button></div><div id="cout"></div>`;
+    const to = () => $("#to").value.trim();
+    const load = async () => { const j = await gql(`query($w:String!){ conversation(withDid:$w, limit:20) { id direction content actorDid } unreadCount }`, { w:to() });
+      if (j.errors) { $("#conv").innerHTML = errBox(j); return; }
+      $("#unr").textContent = "unread total: " + j.data.unreadCount;
+      $("#conv").innerHTML = [...j.data.conversation].reverse().map(m=>`<div class="msg ${m.direction==="out"?"out":"in"}">${esc(m.content)}<div class="note">${esc(m.actorDid)}</div></div>`).join("") || '<p class="note">No messages yet.</p>'; };
+    $("#open").onclick = load;
+    $("#send").onclick = async () => { const j = await gql(`mutation($t:String!,$c:String!){ sendMessage(toDid:$t, content:$c) { id content } }`, { t:to(), c:$("#txt").value }); if (j.errors) { $("#cout").innerHTML = errBox(j); return; } $("#cout").innerHTML=""; $("#txt").value=""; load(); };
+    $("#thr").onclick = async () => { const j = await gql(`{ threads { title lastPreview unreadCount lastAt } }`); $("#conv").innerHTML = j.errors ? errBox(j) : `<table><tr><th>Thread</th><th>Last message</th><th>Unread</th></tr>${j.data.threads.map(t=>`<tr><td>${esc(t.title)}</td><td>${esc(t.lastPreview)}</td><td>${esc(t.unreadCount)}</td></tr>`).join("")}</table>`; };
+  },
+
+  admin() {
+    $("#main").innerHTML = `<p class="note">Admin calls need platform_admin. To change a plan use the Plans & upgrade tab.</p>
+      <div class="row"><input id="adid" size="30" value="did:przma:pz_basic8"><button id="vacc" class="alt">View account</button><button id="evt">Security events</button></div><div id="aout"></div>`;
+    $("#vacc").onclick = async () => { const j = await gql(`query($d:String!){ adminAccount(did:$d) ${ACCESS_Q} }`, { d:$("#adid").value.trim() }); $("#aout").innerHTML = j.errors ? errBox(j) : accessCards(j.data.adminAccount); };
+    $("#evt").onclick = async () => { const j = await gql(`{ adminSecurityEvents(limit:15) { createdAt eventType severity did actionTaken } }`);
+      $("#aout").innerHTML = j.errors ? errBox(j) : `<table><tr><th>When</th><th>Event</th><th>User</th><th>Action</th></tr>${j.data.adminSecurityEvents.map(e=>`<tr><td>${esc(e.createdAt)}</td><td>${chips([e.eventType], e.severity==="high"?"bad":"warn")}</td><td>${esc(e.did)}</td><td>${esc(e.actionTaken)}</td></tr>`).join("")}</table>`; };
+  },
+};
+
+// ================= Calendar view =================
+let calState = {};
+async function calendarView() {
+  const S = calState;   // { cals, calId, events, evIdx }
+  const main = $("#main");
+  main.innerHTML = `
+    <h4 class="t" style="margin-top:0">1 · Calendars</h4>
+    <div class="row"><button id="creload" class="alt">Reload</button> new: <input id="cn" placeholder="name" size="14"><select id="ct"><option>personal</option><option>family</option><option>friends</option><option selected>business</option><option>school</option></select>
+      region <input id="cr" value="IN_TN" size="6"><button id="cmk">Create calendar</button><button id="carch" class="danger">Archive selected</button></div>
+    <div class="scroll" style="max-height:180px"><table id="ctbl"></table></div><div id="cout"></div>
+    <h4 class="t">2 · Sharing (owner of the selected calendar)</h4>
+    <div class="row">user <input id="sd" size="26" value="did:przma:pz_basic7"><select id="sr"><option>viewer</option><option>editor</option></select><button id="sh">Share</button><button id="shl" class="alt">Who has access</button></div><div id="sout"></div>
+    <h4 class="t">3 · Events of the selected calendar (holidays of its region are included)</h4>
+    <div class="row"><select id="rng"><option value="30">next 30 days</option><option value="120">next 120 days</option></select><button id="eload">Load events</button></div>
+    <div class="scroll" style="max-height:260px"><table id="etbl"></table></div>
+    <h4 class="t">4 · New event</h4>
+    <div class="row"><input id="et" placeholder="title" value="Project stand-up"><input id="es" type="datetime-local"><input id="ed" type="number" value="30" style="width:70px"> min
+      <input id="el" placeholder="location / meeting link" size="22"><select id="er"><option value="">no repeat</option><option value="daily">daily</option><option value="weekly">weekly (same weekday)</option></select>
+      <input id="ec" type="number" value="4" style="width:60px"> times <input id="ern" value="15" style="width:50px"> min reminder <button id="emk">Create event</button></div><div id="mout"></div>
+    <h4 class="t">5 · Selected event</h4><div id="sel" class="note">Select an event in the table above.</div>
+    <hr>
+    <h4 class="t" style="margin-top:0">Holidays</h4>
+    <div class="row">region <input id="hr" value="IN_TN" size="6"><button id="hol">Show holidays (next 120 days)</button><span class="note">IN = national · IN_TN also shows Tamil Nadu</span></div><div id="hout"></div>`;
+  const d0 = new Date(Date.now()+3600e3); d0.setMinutes(0,0,0); $("#es").value = localInput(d0);
+  const sel = () => (S.cals||[]).find(c => c.calendarId === S.calId);
+  const renderCals = () => {
+    $("#ctbl").innerHTML = `<tr><th>Name</th><th>Type</th><th>Region</th><th>My role</th><th>Default</th></tr>` + (S.cals||[]).map(c =>
+      `<tr class="pick ${c.calendarId===S.calId?"sel":""}" data-id="${esc(c.calendarId)}"><td><b>${esc(c.name)}</b></td><td>${esc(c.calendarType)}</td><td>${esc(c.region)}</td><td>${esc(c.myRole)}</td><td>${c.isDefault?"yes":""}</td></tr>`).join("");
+    $("#ctbl").querySelectorAll("tr.pick").forEach(tr => tr.onclick = () => { S.calId = tr.dataset.id; S.events = []; S.evIdx = null; renderCals(); renderEvents(); renderSel(); });
+  };
+  const loadCals = async () => {
+    const j = await gql(`{ myCalendars { calendarId name calendarType region isDefault myRole ownerDid } }`);
+    if (j.errors) { $("#cout").innerHTML = errBox(j); return; }
+    S.cals = j.data.myCalendars; if (!sel()) S.calId = (S.cals.find(c=>c.isDefault)||S.cals[0]||{}).calendarId; renderCals();
+  };
+  $("#creload").onclick = loadCals;
+  $("#cmk").onclick = async () => { const j = await gql(`mutation($n:String!,$t:String,$r:String){ createCalendar(name:$n, calendarType:$t, region:$r) { calendarId name } }`, { n:$("#cn").value||"New calendar", t:$("#ct").value, r:$("#cr").value.trim() });
+    $("#cout").innerHTML = j.errors ? errBox(j) : okBox("Created calendar " + esc(j.data.createCalendar.name)); if (!j.errors) { S.calId = j.data.createCalendar.calendarId; loadCals(); } };
+  $("#carch").onclick = async () => { if (!S.calId) return; const j = await gql(`mutation($c:String!){ archiveCalendar(calendarId:$c) }`, { c:S.calId });
+    $("#cout").innerHTML = j.errors ? errBox(j) : okBox("Calendar archived."); if (!j.errors) { S.calId = null; loadCals(); } };
+  $("#sh").onclick = async () => { const j = await gql(`mutation($c:String!,$u:String!,$r:String!){ shareCalendarWithUser(calendarId:$c, userDid:$u, role:$r) { target role } }`, { c:S.calId, u:$("#sd").value.trim(), r:$("#sr").value });
+    $("#sout").innerHTML = j.errors ? errBox(j) : okBox("Shared with " + esc(j.data.shareCalendarWithUser.target) + " as " + esc(j.data.shareCalendarWithUser.role)); };
+  $("#shl").onclick = async () => { const j = await gql(`query($c:String!){ calendarShares(calendarId:$c) { targetType target role sharedBy } }`, { c:S.calId });
+    $("#sout").innerHTML = j.errors ? errBox(j) : (`<table><tr><th>Shared with</th><th>Type</th><th>Role</th><th></th></tr>${j.data.calendarShares.map(s=>`<tr><td>${esc(s.target)}</td><td>${esc(s.targetType)}</td><td>${esc(s.role)}</td><td>${s.targetType==="user"?`<button class="danger sm" data-u="${esc(s.target)}">Remove</button>`:""}</td></tr>`).join("")||'<tr><td class="note" colspan="4">Not shared with anyone.</td></tr>'}</table>`);
+    $("#sout").querySelectorAll("button[data-u]").forEach(b => b.onclick = async () => { const r = await gql(`mutation($c:String!,$u:String!){ unshareCalendar(calendarId:$c, userDid:$u) }`, { c:S.calId, u:b.dataset.u }); $("#sout").innerHTML = r.errors ? errBox(r) : okBox("Access removed."); }); };
+  const renderEvents = () => {
+    $("#etbl").innerHTML = `<tr><th>When</th><th>Title</th><th>Kind</th><th>Status</th><th>My role</th></tr>` + (S.events||[]).map((e,i) =>
+      `<tr class="${e.kind==="holiday"?"":"pick"} ${i===S.evIdx?"sel":""}" data-i="${i}"><td>${esc((e.occurrenceStart||e.startsAt||"").slice(0,16).replace("T"," "))}</td><td>${esc(e.title)}${e.isRecurring?' <span class="chip gray">repeats</span>':""}</td><td>${e.kind==="holiday"?chips(["holiday · "+(e.holidayKind||"")],"warn"):chips(["event"],"ok")}</td><td>${esc(e.status||"")}</td><td>${esc(e.myRole||"")}</td></tr>`).join("") || '<tr><td colspan="5" class="note">No events in this range.</td></tr>';
+    $("#etbl").querySelectorAll("tr.pick").forEach(tr => tr.onclick = () => { S.evIdx = Number(tr.dataset.i); renderEvents(); renderSel(); });
+  };
+  const loadEvents = async () => {
+    if (!S.calId) return;
+    const j = await gql(`query($c:String!,$f:String!,$t:String!){ calendarEvents(calendarId:$c, from:$f, to:$t) { eventId calendarId title location notes myNote startsAt endsAt occurrenceStart occurrenceEnd kind status myRole isRecurring holidayKind } }`, { c:S.calId, f:dayStart(0), t:dayStart(Number($("#rng").value)) });
+    if (j.errors) { $("#etbl").innerHTML = ""; $("#mout").innerHTML = errBox(j); return; }
+    S.events = j.data.calendarEvents; S.evIdx = null; renderEvents(); renderSel();
+  };
+  $("#eload").onclick = loadEvents;
+  $("#emk").onclick = async () => {
+    const s = new Date($("#es").value), e = new Date(s.getTime() + Number($("#ed").value||30)*60000), rep = $("#er").value;
+    const input = { title:$("#et").value, startsAt:ist(s), endsAt:ist(e), location:$("#el").value || null, reminders:[Number($("#ern").value||15)] };
+    if (rep) input.recurrence = { freq:rep, interval:1, count:Number($("#ec").value||4), ...(rep==="weekly" ? { byDay:[DAYS[s.getDay()]] } : {}) };
+    const j = await gql(`mutation($c:String!,$i:CalendarEventInput!){ createEvent(calendarId:$c, input:$i) { eventId title startsAt } }`, { c:S.calId, i:input });
+    $("#mout").innerHTML = j.errors ? errBox(j) : okBox("Created: " + esc(j.data.createEvent.title) + " at " + esc(j.data.createEvent.startsAt)); if (!j.errors) loadEvents();
+  };
+  const renderSel = () => {
+    const e = (S.events||[])[S.evIdx]; const box = $("#sel");
+    if (!e) { box.innerHTML = "Select an event in the table above."; return; }
+    box.className = "";
+    box.innerHTML = `<div class="box"><b>${esc(e.title)}</b> · ${esc((e.occurrenceStart||e.startsAt||"").slice(0,16).replace("T"," "))} · ${chips([e.myRole||"?"],"gray")}${e.location?` · ${esc(e.location)}`:""}</div>
+      <div class="row"><input id="nt" placeholder="new title" size="16"><button id="upd" class="alt">Rename</button><button id="can" class="danger">Cancel event</button><button id="skp" class="alt">Skip this occurrence</button></div>
+      <div class="row"><input id="pn" placeholder="my private note" size="24" value="${esc(e.myNote||"")}"><button id="note" class="alt">Save private note</button></div>
+      <div class="row"><input id="iv" size="40" value="did:przma:pz_basic7, did:przma:pz_basic8"><button id="inv" class="alt">Invite</button><button id="ivl" class="alt">Show invites / RSVPs</button></div>
+      <div class="row">my RSVP: <button class="sm" data-r="accepted">accept</button><button class="sm alt" data-r="tentative">tentative</button><button class="sm danger" data-r="declined">decline</button></div><div id="eout"></div>`;
+    const out = html => $("#eout").innerHTML = html, done = msg => { $("#mout").innerHTML = okBox(esc(msg)); loadEvents(); }, ids = { c:e.calendarId || S.calId, e:e.eventId };
+    $("#upd").onclick = async () => { const j = await gql(`mutation($c:String!,$e:String!,$i:CalendarEventInput!){ updateEvent(calendarId:$c, eventId:$e, input:$i) { title } }`, { ...ids, i:{ title:$("#nt").value } }); if (j.errors) out(errBox(j)); else done("Renamed."); };
+    $("#can").onclick = async () => { const j = await gql(`mutation($c:String!,$e:String!){ cancelEvent(calendarId:$c, eventId:$e) }`, ids); if (j.errors) out(errBox(j)); else done("Event cancelled."); };
+    $("#skp").onclick = async () => { const j = await gql(`mutation($c:String!,$e:String!,$o:String!){ skipOccurrence(calendarId:$c, eventId:$e, occurrenceStart:$o) }`, { ...ids, o:e.occurrenceStart || e.startsAt }); if (j.errors) out(errBox(j)); else done("That one occurrence is skipped; the rest of the series stays."); };
+    $("#note").onclick = async () => { const j = await gql(`mutation($c:String!,$e:String!,$t:String!){ setPrivateNote(calendarId:$c, eventId:$e, text:$t) }`, { ...ids, t:$("#pn").value }); out(j.errors?errBox(j):okBox("Private note saved (only you can see it).")); };
+    $("#inv").onclick = async () => { const dids = $("#iv").value.split(",").map(x=>x.trim()).filter(Boolean); const j = await gql(`mutation($c:String!,$e:String!,$u:[String!]!){ inviteToEvent(calendarId:$c, eventId:$e, userDids:$u) { inviteeDid rsvp } }`, { ...ids, u:dids }); out(j.errors?errBox(j):okBox("Invited " + esc(j.data.inviteToEvent.map(x=>x.inviteeDid).join(", ")))); };
+    $("#ivl").onclick = async () => { const j = await gql(`query($c:String!,$e:String!){ eventInvites(calendarId:$c, eventId:$e) { inviteeDid rsvp respondedAt } }`, ids);
+      out(j.errors?errBox(j):`<table><tr><th>Invitee</th><th>RSVP</th></tr>${j.data.eventInvites.map(i=>`<tr><td>${esc(i.inviteeDid)}</td><td>${chips([i.rsvp], i.rsvp==="accepted"?"ok":i.rsvp==="declined"?"bad":"warn")}</td></tr>`).join("")||'<tr><td colspan="2" class="note">No invites.</td></tr>'}</table>`); };
+    box.querySelectorAll("button[data-r]").forEach(b => b.onclick = async () => { const j = await gql(`mutation($c:String!,$e:String!,$r:String!){ rsvpEvent(calendarId:$c, eventId:$e, response:$r) }`, { ...ids, r:b.dataset.r }); out(j.errors?errBox(j):okBox("Your answer: " + esc(b.dataset.r))); });
+  };
+  $("#hol").onclick = async () => { const j = await gql(`query($r:String!,$f:String!,$t:String!){ holidays(region:$r, from:$f, to:$t) { title startsAt holidayKind } }`, { r:$("#hr").value.trim(), f:dayStart(0), t:dayStart(120) });
+    $("#hout").innerHTML = j.errors ? errBox(j) : (`<table><tr><th>Date</th><th>Holiday</th><th>Kind</th></tr>${j.data.holidays.map(h=>`<tr><td>${esc((h.startsAt||"").slice(0,10))}</td><td>${esc(h.title)}</td><td>${chips([h.holidayKind||"public"],"warn")}</td></tr>`).join("")||'<tr><td colspan="3" class="note">No holidays loaded for this region in the next 120 days.</td></tr>'}</table>`); };
+  await loadCals(); renderEvents(); renderSel();
+}
+show("access");
+</script>
+</body>
+</html>
